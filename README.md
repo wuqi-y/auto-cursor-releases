@@ -68,6 +68,57 @@
 
 <img width="1026" height="902" alt="image" src="https://github.com/user-attachments/assets/4df4624f-f93c-4a35-8517-b4708571c240" />
 
+## 使用说明
+
+### 1. 检查 Cursor 安装
+应用启动时会自动检测系统中的 Cursor 编辑器安装。如果未检测到，会显示相应提示。
+
+### 2. 选择备份文件
+在主界面中，应用会列出所有可用的机器ID备份文件，包括：
+- 文件名
+- 创建日期
+- 文件大小
+
+### 3. 预览机器ID
+选择备份文件后，可以预览其中包含的机器ID信息：
+- `telemetry.devDeviceId`
+- `telemetry.macMachineId` 
+- `telemetry.machineId`
+- `telemetry.sqmId`
+- `storage.serviceMachineId`
+
+### 4. 确认恢复
+确认要恢复的机器ID后，应用会：
+- 创建当前配置的备份
+- 更新 storage.json 文件
+- 更新 SQLite 数据库
+- 更新 machineId 文件
+- 更新系统级标识（如果有权限）
+
+### 5. 完成恢复
+恢复完成后，需要：
+- 关闭 Cursor 编辑器
+- 重新启动 Cursor 编辑器
+- 检查编辑器是否正常工作
+
+## 安全说明
+
+- 应用只读取和修改 Cursor 相关的配置文件
+- 系统级操作需要相应权限
+- 所有操作前都会创建备份
+- 不会收集或上传任何用户数据
+
+## 常见问题
+
+### Q: 为什么需要管理员权限？
+A: 某些系统级ID更新（如Windows注册表、macOS系统配置）需要提升权限。
+
+### Q: 恢复失败怎么办？
+A: 应用会显示详细的错误信息，并且已创建的备份可以用于手动恢复。
+
+### Q: 支持哪些备份文件格式？
+A: 支持标准的 JSON 格式备份文件，文件名格式为 `storage.json.bak.YYYYMMDD_HHMMSS`。
+
 
 <h1>📩 Disclaimer | 免责声明</h1>
 本工具仅供学习和研究使用，使用本工具所产生的任何后果由使用者自行承担。
