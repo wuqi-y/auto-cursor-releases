@@ -58,6 +58,16 @@ pnpm tauri dev
 pnpm tauri:build
 ```
 
+## 自动注册采用的py的脚本打包后使用的
+
+### 运行方式,在python_scripts目录下
+
+```bash
+python3 -m venv venv && ./venv/bin/pip install -U pip && ./venv/bin/pip install -r requirements_minimal.txt
+```
+
+- `python ./build_executable.py`
+
 ## 常用脚本
 
 - `pnpm dev`：仅启动前端 Vite 开发服务器
