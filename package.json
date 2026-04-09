@@ -1,0 +1,41 @@
+{
+  "name": "auto-cursor",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "tauri:build": "tauri build",
+    "tauri:build:intel": "tauri build --target x86_64-apple-darwin",
+    "tauri:build:m1": "tauri build --target aarch64-apple-darwin",
+    "tauri:build:universal": "tauri build --target universal-apple-darwin",
+    "tauri:build:macos": "bash scripts/build-macos.sh",
+    "upload:release": "bash scripts/upload.sh"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-dialog": "~2",
+    "@tauri-apps/plugin-opener": "^2",
+    "@types/react-router-dom": "^5.3.3",
+    "axios": "^1.11.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "react-markdown": "^10.1.0",
+    "react-router-dom": "^7.8.2",
+    "zustand": "^5.0.8"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "@vitejs/plugin-react": "^4.6.0",
+    "autoprefixer": "^10.4.19",
+    "postcss": "^8.4.39",
+    "tailwindcss": "^3.4.6",
+    "typescript": "~5.8.3",
+    "vite": "^7.0.4"
+  }
+}

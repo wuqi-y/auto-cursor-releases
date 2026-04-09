@@ -1,0 +1,97 @@
+name: Quick Build (Current Platform)
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: "Platform to build for"
+        required: true
+        default: "current"
+        type: choice
+        options:
+          - current
+          # - macos-intel
+          # - macos-m1
+          - linux
+          - windows
+jobs:
+  quick-build:
+    runs-on: >-
+      ${{
+        inputs.platform == 'windows' && 'windows-latest' ||
+        inputs.platform == 'linux' && 'ubuntu-22.04' ||
+        (inputs.platform == 'macos-intel' || inputs.platform == 'macos-m1') && 'macos-latest' ||
+        'macos-latest'
+      }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install Node.js dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: >-
+            ${{
+              inputs.platform == 'macos-intel' && 'x86_64-apple-darwin' ||
+              inputs.platform == 'macos-m1' && 'aarch64-apple-darwin' ||
+              inputs.platform == 'linux' && 'x86_64-unknown-linux-gnu' ||
+              inputs.platform == 'windows' && 'x86_64-pc-windows-msvc' ||
+              ''
+            }}
+
+      - name: Install Linux dependencies
+        if: inputs.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libgtk-3-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libsoup-3.0-dev \
+            patchelf
+
+      - name: Build frontend
+        run: pnpm build
+
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          args: >-
+            ${{
+              inputs.platform == 'macos-intel' && '--target x86_64-apple-darwin' ||
+              inputs.platform == 'macos-m1' && '--target aarch64-apple-darwin' ||
+              inputs.platform == 'linux' && '--target x86_64-unknown-linux-gnu' ||
+              inputs.platform == 'windows' && '--target x86_64-pc-windows-msvc' ||
+              ''
+            }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: auto-cursor-quick-build-${{ inputs.platform }}
+          path: src-tauri/target/*/release/bundle/**/*
+          if-no-files-found: warn

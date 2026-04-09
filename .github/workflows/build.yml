@@ -1,0 +1,188 @@
+name: Build and Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # - platform: "macos-latest" # macOS Intel
+          #   args: "--target x86_64-apple-darwin"
+          #   target: x86_64-apple-darwin
+          #   arch: x86_64
+          #   os: macos
+          # - platform: "macos-latest" # macOS M1
+          #   args: "--target aarch64-apple-darwin"
+          #   target: aarch64-apple-darwin
+          #   arch: aarch64
+          #   os: macos
+          - platform: "ubuntu-22.04" # Linux x64
+            args: "--target x86_64-unknown-linux-gnu"
+            target: x86_64-unknown-linux-gnu
+            arch: x86_64
+            os: linux
+          - platform: "windows-latest" # Windows x64
+            args: "--target x86_64-pc-windows-msvc"
+            target: x86_64-pc-windows-msvc
+            arch: x86_64
+            os: windows
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install Node.js dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux dependencies
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libgtk-3-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libsoup-3.0-dev \
+            patchelf
+
+      - name: Setup Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: Build frontend
+        run: pnpm build
+
+      - name: Clean pyBuild for current platform
+        shell: bash
+        run: |
+          # 只保留当前平台的pyBuild文件，删除其他平台的
+          if [ "${{ matrix.os }}" = "macos" ]; then
+            rm -rf src-tauri/pyBuild/windows
+            rm -rf src-tauri/pyBuild/linux
+          elif [ "${{ matrix.os }}" = "windows" ]; then
+            rm -rf src-tauri/pyBuild/macos
+            rm -rf src-tauri/pyBuild/linux
+          elif [ "${{ matrix.os }}" = "linux" ]; then
+            rm -rf src-tauri/pyBuild/macos
+            rm -rf src-tauri/pyBuild/windows
+          fi
+
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          args: ${{ matrix.args }}
+
+      - name: Prepare artifacts (macOS)
+        if: matrix.os == 'macos'
+        run: |
+          mkdir -p artifacts
+          # 只复制 .dmg 文件
+          find src-tauri/target/${{ matrix.target }}/release/bundle -name "*.dmg" -exec cp {} artifacts/ \;
+          # 重命名文件以包含架构信息
+          cd artifacts
+          for file in *.dmg; do
+            if [ -f "$file" ]; then
+              mv "$file" "${file%.dmg}_${{ matrix.arch }}.dmg"
+            fi
+          done
+
+      - name: Prepare artifacts (Windows)
+        if: matrix.os == 'windows'
+        run: |
+          mkdir artifacts
+          # 优先复制 .exe 安装程序文件，如果没有则复制 .msi
+          $exeFiles = Get-ChildItem -Path "src-tauri/target/${{ matrix.target }}/release/bundle" -Recurse -Include "*.exe"
+          if ($exeFiles) {
+            $exeFiles | Copy-Item -Destination "artifacts/"
+          } else {
+            Get-ChildItem -Path "src-tauri/target/${{ matrix.target }}/release/bundle" -Recurse -Include "*.msi" | Copy-Item -Destination "artifacts/"
+          }
+
+      - name: Prepare artifacts (Linux)
+        if: matrix.os == 'linux'
+        run: |
+          mkdir -p artifacts
+          # 复制 .deb 和 .AppImage 文件
+          find src-tauri/target/${{ matrix.target }}/release/bundle -name "*.deb" -exec cp {} artifacts/ \;
+          find src-tauri/target/${{ matrix.target }}/release/bundle -name "*.AppImage" -exec cp {} artifacts/ \;
+          # 重命名文件以包含架构信息
+          cd artifacts
+          for file in *.deb; do
+            if [ -f "$file" ]; then
+              mv "$file" "${file%.deb}_${{ matrix.arch }}.deb"
+            fi
+          done
+          for file in *.AppImage; do
+            if [ -f "$file" ]; then
+              mv "$file" "${file%.AppImage}_${{ matrix.arch }}.AppImage"
+            fi
+          done
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: auto-cursor-${{ matrix.os }}-${{ matrix.arch }}
+          path: artifacts/*
+          if-no-files-found: warn
+          compression-level: 0 # 不压缩，保持原始文件格式
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: artifacts/**/*
+          draft: false
+          prerelease: ${{ contains(github.ref, '-') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

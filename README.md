@@ -1,128 +1,139 @@
-<h1 align="center">🚀 Auto Cursor - 专业的 Cursor IDE 管理工具</h1>
+# Auto Cursor
 
-<br/>
-
-<div align="center">
+一个基于 `Tauri 2 + React + TypeScript + Rust` 的跨平台桌面工具，聚焦 Cursor 相关账号管理、Token 管理、Machine ID 备份/恢复与自动化流程。
 
 
-![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-blue)
-![License](https://img.shields.io/badge/license-MIT-green)
-![Version](https://img.shields.io/badge/version-1.0.0-orange)
+## 截图预览
 
-**一键管理您的 Cursor IDE 账户、订阅和使用量**
+### 黑暗模式
 
-[📥 立即下载](https://github.com/wuqi-y/auto-cursor-releases/releases) · [📖 使用指南](https://github.com/wuqi-y/auto-cursor-releases/releases) · [🐛 问题反馈](https://github.com/wuqi-y/auto-cursor-releases/issues)
+![黑暗模式预览](./docs/images/dark-mode.png)
 
-</div>
+### 白天模式
 
-  <br/>
-  <br/>
-
-<img width="1000" height="700" alt="image" src="https://github.com/user-attachments/assets/7db1246e-ae69-4446-8fe9-35456f14c757" />
-
-<div align="center">
-  <br/>
-  <h3>支持重置id以及备份恢复等</h3>
-  <br/>
-</div>
-
-<img width="1000" height="700" alt="image" src="https://github.com/user-attachments/assets/5994578c-54a9-4a97-a154-071dde62d821" />
-
-<div align="center">
-  <br/>
-  <h3>支持检查授权状态查看当前信息</h3>
-  <br/>
-</div>
-
-<img width="871" height="1094" alt="image" src="https://github.com/user-attachments/assets/5549ae73-e015-41aa-b72e-06a70875327d" />
+![白天模式预览](./docs/images/light-mode.png)
 
 
+## 主要特性
 
-<div align="center">
-  <br/>
-  <h3>方便查看token使用量</h3>
-  <br/>
-</div>
+- Cursor 环境检测：自动识别安装状态与关键路径。
+- Cursor、Codex-GPT账户CDP协议浏览器自动注册。
+- Machine ID 管理：备份、恢复、重置与相关诊断能力。
+- Token / 账户管理：批量导入导出、快速切换、分组筛选、状态查看、无感换号。
+- Codex Token 文件管理：列表、复制、预览、打开对应目录。
+- 授权与订阅信息：拉取授权状态、订阅状态、用量信息。
+- 自动化流程：支持验证码流程、手动输入兜底等场景。
+- 多主题 UI：支持浅色/深色模式，适配桌面窗口体验。
 
-<img width="1000" height="700" alt="image" src="https://github.com/user-attachments/assets/801a1c98-911c-4337-83e0-c2c465bff203" />
-<img width="1000" height="700" alt="image" src="https://github.com/user-attachments/assets/36bf6098-9c10-4300-aff3-6dbf54215d50" />
+## 技术栈
 
-<div align="center">
-  <br/>
-  <h3>快捷添加和切换账号方便管理</h3>
-  <h3>注销账户：一键删除cursor账户；取消订阅：自动打开新窗口注入登录态跳转到取消订阅页面，需要手动点击取消；切换账号会自动重置机器id</h3>
-  <br/>
-</div>
+- 前端：`React 19`、`TypeScript`、`Vite`、`Tailwind CSS`、`Zustand`
+- 桌面：`Tauri 2`
+- 后端：`Rust`、`Tokio`、`Reqwest`、`Rusqlite`
 
-<img width="933" height="539" alt="image" src="https://github.com/user-attachments/assets/822d1185-a77b-4b2c-98a2-9c773e6171c6" />
+## 环境要求
 
-<img width="1026" height="902" alt="image" src="https://github.com/user-attachments/assets/5594980c-71e8-4af5-a4e1-2e8efbf6c85b" />
+- Node.js `18+`（推荐 `20+`）
+- `pnpm`（也可使用 npm，但文档以 pnpm 为例）
+- Rust 工具链（建议 stable 最新版）
+- 已安装 Cursor 客户端
 
-<div align="center">
-  <br/>
-  <h3>支持自动注册-自动获取验证码-自动绑卡-绑卡后自动添加账号并获取 accessToken 和 WorkosCursorSessionToken（自动注册部分代码参考 <a href="https://github.com/yeongpin/cursor-free-vip" target="_blank">cursor-free-vip</a>）</h3>
-  <br/>
-</div>
+## 快速开始
 
- -- 自动获取验证码暂时只支持 <a href="https://github.com/dreamhunter2333/cloudflare_temp_email" target="_blank">cloudflare_temp_email</a>
+### 1) 安装依赖
 
-<img width="1026" height="902" alt="image" src="https://github.com/user-attachments/assets/4df4624f-f93c-4a35-8517-b4708571c240" />
+```bash
+pnpm install
+```
 
-## 使用说明
+### 2) 启动开发环境
 
-### 1. 检查 Cursor 安装
-应用启动时会自动检测系统中的 Cursor 编辑器安装。如果未检测到，会显示相应提示。
+```bash
+pnpm tauri dev
+```
 
-### 2. 选择备份文件
-在主界面中，应用会列出所有可用的机器ID备份文件，包括：
-- 文件名
-- 创建日期
-- 文件大小
+### 3) 构建桌面应用
 
-### 3. 预览机器ID
-选择备份文件后，可以预览其中包含的机器ID信息：
-- `telemetry.devDeviceId`
-- `telemetry.macMachineId` 
-- `telemetry.machineId`
-- `telemetry.sqmId`
-- `storage.serviceMachineId`
+```bash
+pnpm tauri:build
+```
 
-### 4. 确认恢复
-确认要恢复的机器ID后，应用会：
-- 创建当前配置的备份
-- 更新 storage.json 文件
-- 更新 SQLite 数据库
-- 更新 machineId 文件
-- 更新系统级标识（如果有权限）
+## 常用脚本
 
-### 5. 完成恢复
-恢复完成后，需要：
-- 关闭 Cursor 编辑器
-- 重新启动 Cursor 编辑器
-- 检查编辑器是否正常工作
+- `pnpm dev`：仅启动前端 Vite 开发服务器
+- `pnpm tauri dev`：启动 Tauri 开发模式（前后端联调）
+- `pnpm build`：构建前端产物
+- `pnpm tauri:build`：构建桌面安装包
 
-## 安全说明
+## 项目结构
 
-- 应用只读取和修改 Cursor 相关的配置文件
-- 系统级操作需要相应权限
-- 所有操作前都会创建备份
-- 不会收集或上传任何用户数据
+```text
+auto-cursor/
+├─ src/                         # React 前端源码
+├─ src-tauri/                   # Tauri + Rust 后端
+│  ├─ src/
+│  │  ├─ lib.rs                 # Tauri 命令入口与核心逻辑
+│  │  └─ cursor_backup.rs       # 备份/目录打开等能力
+│  ├─ Cargo.toml
+│  └─ tauri.conf.json
+├─ scripts/                     # 构建/发布脚本
+├─ README.md
+└─ package.json
+```
 
-## 常见问题
+## 功能说明（简版）
 
-### Q: 为什么需要管理员权限？
-A: 某些系统级ID更新（如Windows注册表、macOS系统配置）需要提升权限。
+### Token / 账户管理
 
-### Q: 恢复失败怎么办？
-A: 应用会显示详细的错误信息，并且已创建的备份可以用于手动恢复。
+- 支持账户分组、筛选、排序、批量操作。
+- 支持从剪贴板导入/导出账户数据。
+- 支持自动获取 Token 与验证码流程兜底（手动输入验证码）。
 
-### Q: 支持哪些备份文件格式？
-A: 支持标准的 JSON 格式备份文件，文件名格式为 `storage.json.bak.YYYYMMDD_HHMMSS`。
+### Machine ID 管理
 
+- 支持读取、备份、恢复与重置。
+- 在关键修改前会尽量进行备份，降低误操作风险。
+
+### Codex 账户列表
+
+- 支持查看 token 文件列表。
+- 支持复制内容、弹窗预览、打开对应文件夹。
+
+## 安全与隐私
+
+- 工具仅处理本地文件与本地系统环境相关配置。
+- 默认不上传用户本地配置内容到远端服务。
+- 某些操作可能需要更高系统权限（例如 Windows 注册表相关场景）。
+
+> 使用本工具前请先备份重要数据，风险自担。
+
+## FAQ
+
+### 为什么某些操作需要管理员权限？
+
+部分系统级修改（如注册表、系统路径写入）需要更高权限才能生效。
+
+### 出现验证码自动获取失败怎么办？
+
+前端已提供手动输入验证码流程，可在提示后直接输入继续。
+
+### 支持哪些平台？
+
+理论支持 Windows / macOS / Linux（以实际构建与环境依赖为准）。
+
+## 贡献指南
+
+欢迎提交 PR 与 Issue。建议流程：
+
+1. Fork 并新建分支：`feat/xxx` 或 `fix/xxx`
+2. 提交清晰的 commit message
+3. 提交 PR，说明变更背景、方案与测试结果
+
+## 开源许可证
+
+`MIT License`
 
 <h1>📩 Disclaimer | 免责声明</h1>
 本工具仅供学习和研究使用，使用本工具所产生的任何后果由使用者自行承担。
 
 This tool is only for learning and research purposes, and any consequences arising from the use of this tool are borne by the user.
-
-

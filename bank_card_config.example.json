@@ -1,0 +1,12 @@
+{
+  "cardNumber": "54504694048473xx",
+  "cardExpiry": "08/30",
+  "cardCvc": "603",
+  "billingName": "张三",
+  "billingCountry": "China",
+  "billingPostalCode": "100000",
+  "billingAdministrativeArea": "北京市 — Beijing Shi",
+  "billingLocality": "北京市",
+  "billingDependentLocality": "朝阳区",
+  "billingAddressLine1": "朝阳路123号"
+}

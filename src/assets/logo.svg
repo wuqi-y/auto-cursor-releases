@@ -1,0 +1,50 @@
+<svg width="120" height="120" viewBox="0 0 120 120" fill="none"
+  xmlns="http://www.w3.org/2000/svg">
+  <!-- 外圆背景 -->
+  <circle cx="60" cy="60" r="58" fill="url(#gradient1)" stroke="url(#gradient2)" stroke-width="4"/>
+
+  <!-- 内圆 -->
+  <circle cx="60" cy="60" r="42" fill="url(#innerGradient)" opacity="0.1"/>
+
+  <!-- 主要图标 - 光标符号 -->
+  <path d="M35 35 L75 40 L50 65 L45 45 Z" fill="white" stroke="none"/>
+  <path d="M35 35 L75 40 L50 65 L45 45 Z" fill="url(#cursorGradient)" opacity="0.9"/>
+
+  <!-- 管理工具符号 - 齿轮 -->
+  <g transform="translate(70, 70)">
+    <circle cx="0" cy="0" r="12" fill="white" opacity="0.9"/>
+    <path d="M-8,-2 L-8,2 L-12,2 L-12,6 L-8,6 L-8,10 L-4,10 L-4,6 L0,6 L0,10 L4,10 L4,6 L8,6 L8,2 L4,2 L4,-2 L8,-2 L8,-6 L4,-6 L4,-10 L0,-10 L0,-6 L-4,-6 L-4,-10 L-8,-10 L-8,-6 L-12,-6 L-12,-2 Z" fill="#3B82F6"/>
+    <circle cx="0" cy="0" r="4" fill="white"/>
+  </g>
+
+  <!-- 数据分析符号 - 图表线条 -->
+  <g transform="translate(25, 75)" opacity="0.8">
+    <path d="M0,15 L5,10 L10,12 L15,5 L20,8 L25,2" stroke="white" stroke-width="2" fill="none"/>
+    <circle cx="0" cy="15" r="2" fill="white"/>
+    <circle cx="5" cy="10" r="2" fill="white"/>
+    <circle cx="10" cy="12" r="2" fill="white"/>
+    <circle cx="15" cy="5" r="2" fill="white"/>
+    <circle cx="20" cy="8" r="2" fill="white"/>
+    <circle cx="25" cy="2" r="2" fill="white"/>
+  </g>
+
+  <!-- 渐变定义 -->
+  <defs>
+    <linearGradient id="gradient1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#6366F1;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#3B82F6;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="gradient2" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#8B5CF6;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#06B6D4;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="innerGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#FFFFFF;stop-opacity:0.3" />
+      <stop offset="100%" style="stop-color:#FFFFFF;stop-opacity:0.1" />
+    </linearGradient>
+    <linearGradient id="cursorGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#FFFFFF;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#F1F5F9;stop-opacity:0.9" />
+    </linearGradient>
+  </defs>
+</svg>

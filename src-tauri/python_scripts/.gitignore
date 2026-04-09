@@ -1,0 +1,31 @@
+# Python虚拟环境
+venv/
+env/
+.venv/
+.env/
+
+# Python字节码
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# 临时文件
+*.tmp
+*.log
+test_accounts.txt
+
+# IDE文件
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# macOS文件
+.DS_Store
+
+# Windows文件
+Thumbs.db
+temp_oauth_data.json
+token_*.json

@@ -1,0 +1,7 @@
+colorama>=0.4.6
+requests>=2.28.0
+DrissionPage>=4.0.0
+faker>=15.0.0
+python-dotenv>=1.0.0
+pyinstaller
+faker>=15.0.0

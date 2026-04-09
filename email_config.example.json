@@ -1,0 +1,6 @@
+{
+  "worker_domain": "mail.example.com",
+  "email_domain": "example.com",
+  "admin_password": "your-admin-password",
+  "access_password": "your-access-password"
+}

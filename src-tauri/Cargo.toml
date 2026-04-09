@@ -1,0 +1,71 @@
+[package]
+name = "auto-cursor"
+version = "0.2.0"
+description = "A Tauri App"
+authors = ["you"]
+edition = "2024"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "auto_cursor_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
+tauri-plugin-positioner = { version = "2.0.0", features = ["tray-icon"] }
+tauri-plugin-opener = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-shell = "2"
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5.0"
+anyhow = "1.0"
+thiserror = "1.0"
+rand = "0.8"
+uuid = { version = "1.0", features = ["v4"] }
+sha2 = "0.10"
+# regex = "1.0"
+regex = "1.11.2"
+reqwest = { version = "0.11", features = ["json", "gzip", "deflate", "brotli"] }
+urlencoding = "2.1"
+base64 = "0.21"
+hex = "0.4"
+rusqlite = { version = "0.29", features = ["bundled"] }
+tauri-plugin-dialog = "2"
+tar = "0.4"
+flate2 = "1.0"
+once_cell = "1.19"
+warp = "0.3"
+futures = "0.3"
+fs2 = "0.4"
+encoding_rs = "0.8"
+# Python脚本调用不需要额外的浏览器自动化依赖
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.50"
+winapi = { version = "0.3", features = ["winuser"] }
+clipboard-win = "5.0"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+plist = "1.4"
+cocoa = "0.25"
+objc = "0.2"
+
+# 优化release构建以减小文件大小
+[profile.release]
+opt-level = "z"     # 优化大小而不是速度
+lto = true          # 启用链接时优化
+codegen-units = 1   # 减少代码生成单元以获得更好的优化
+panic = "abort"     # 使用abort而不是unwind减小大小
+strip = true        # 去除调试符号
+

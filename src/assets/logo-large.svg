@@ -1,0 +1,119 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none"
+  xmlns="http://www.w3.org/2000/svg">
+  <!-- 主背景圆 -->
+  <circle cx="128" cy="128" r="120" fill="url(#mainGradient)" stroke="url(#borderGradient)" stroke-width="8"/>
+
+  <!-- 内层光效 -->
+  <circle cx="128" cy="128" r="100" fill="url(#innerGlow)" opacity="0.15"/>
+  <circle cx="128" cy="128" r="80" fill="url(#centerGlow)" opacity="0.1"/>
+
+  <!-- 主要光标图标 -->
+  <g transform="translate(88, 88)">
+    <!-- 光标主体 -->
+    <path d="M10 10 L70 20 L40 50 L30 30 Z" fill="url(#cursorMain)" stroke="rgba(255,255,255,0.3)" stroke-width="2"/>
+    <!-- 光标高光 -->
+    <path d="M15 15 L35 18 L25 28 L20 20 Z" fill="rgba(255,255,255,0.6)"/>
+  </g>
+
+  <!-- 管理工具图标 - 现代齿轮 -->
+  <g transform="translate(170, 170)">
+    <circle cx="0" cy="0" r="25" fill="rgba(255,255,255,0.95)" stroke="url(#gearBorder)" stroke-width="2"/>
+    <!-- 齿轮齿 -->
+    <g fill="url(#gearGradient)">
+      <rect x="-3" y="-28" width="6" height="8" rx="2"/>
+      <rect x="-3" y="20" width="6" height="8" rx="2"/>
+      <rect x="20" y="-3" width="8" height="6" rx="2"/>
+      <rect x="-28" y="-3" width="8" height="6" rx="2"/>
+      <rect x="14" y="-20" width="6" height="8" rx="2" transform="rotate(45)"/>
+      <rect x="-20" y="-20" width="6" height="8" rx="2" transform="rotate(-45)"/>
+      <rect x="14" y="12" width="6" height="8" rx="2" transform="rotate(-45)"/>
+      <rect x="-20" y="12" width="6" height="8" rx="2" transform="rotate(45)"/>
+    </g>
+    <!-- 齿轮中心 -->
+    <circle cx="0" cy="0" r="8" fill="url(#centerGradient)"/>
+    <circle cx="0" cy="0" r="4" fill="white"/>
+  </g>
+
+  <!-- 数据分析图表 -->
+  <g transform="translate(50, 180)" opacity="0.9">
+    <!-- 图表背景 -->
+    <rect x="0" y="0" width="60" height="40" rx="6" fill="rgba(255,255,255,0.15)" stroke="rgba(255,255,255,0.3)" stroke-width="1"/>
+    <!-- 数据线 -->
+    <path d="M8,32 L16,24 L24,28 L32,16 L40,20 L48,8" stroke="url(#chartLine)" stroke-width="3" fill="none" stroke-linecap="round"/>
+    <!-- 数据点 -->
+    <circle cx="8" cy="32" r="3" fill="white" stroke="url(#pointBorder)" stroke-width="1"/>
+    <circle cx="16" cy="24" r="3" fill="white" stroke="url(#pointBorder)" stroke-width="1"/>
+    <circle cx="24" cy="28" r="3" fill="white" stroke="url(#pointBorder)" stroke-width="1"/>
+    <circle cx="32" cy="16" r="3" fill="white" stroke="url(#pointBorder)" stroke-width="1"/>
+    <circle cx="40" cy="20" r="3" fill="white" stroke="url(#pointBorder)" stroke-width="1"/>
+    <circle cx="48" cy="8" r="3" fill="white" stroke="url(#pointBorder)" stroke-width="1"/>
+  </g>
+
+  <!-- 代码符号 -->
+  <g transform="translate(180, 60)" opacity="0.8">
+    <rect x="0" y="0" width="40" height="30" rx="4" fill="rgba(255,255,255,0.1)" stroke="rgba(255,255,255,0.3)" stroke-width="1"/>
+    <text x="20" y="20" text-anchor="middle" font-family="monospace" font-size="16" fill="white" opacity="0.8">&lt;/&gt;</text>
+  </g>
+
+  <!-- 渐变和效果定义 -->
+  <defs>
+    <!-- 主背景渐变 -->
+    <linearGradient id="mainGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#6366F1;stop-opacity:1" />
+      <stop offset="50%" style="stop-color:#3B82F6;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#1E40AF;stop-opacity:1" />
+    </linearGradient>
+
+    <!-- 边框渐变 -->
+    <linearGradient id="borderGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#8B5CF6;stop-opacity:1" />
+      <stop offset="50%" style="stop-color:#06B6D4;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#10B981;stop-opacity:1" />
+    </linearGradient>
+
+    <!-- 内层光效 -->
+    <radialGradient id="innerGlow" cx="50%" cy="30%" r="70%">
+      <stop offset="0%" style="stop-color:#FFFFFF;stop-opacity:0.4" />
+      <stop offset="100%" style="stop-color:#FFFFFF;stop-opacity:0" />
+    </radialGradient>
+
+    <radialGradient id="centerGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" style="stop-color:#FFFFFF;stop-opacity:0.3" />
+      <stop offset="100%" style="stop-color:#FFFFFF;stop-opacity:0" />
+    </radialGradient>
+
+    <!-- 光标渐变 -->
+    <linearGradient id="cursorMain" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#FFFFFF;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#E2E8F0;stop-opacity:0.95" />
+    </linearGradient>
+
+    <!-- 齿轮相关渐变 -->
+    <linearGradient id="gearGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#3B82F6;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#1E40AF;stop-opacity:1" />
+    </linearGradient>
+
+    <linearGradient id="gearBorder" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#60A5FA;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#3B82F6;stop-opacity:1" />
+    </linearGradient>
+
+    <radialGradient id="centerGradient" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" style="stop-color:#60A5FA;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#3B82F6;stop-opacity:1" />
+    </radialGradient>
+
+    <!-- 图表相关渐变 -->
+    <linearGradient id="chartLine" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#10B981;stop-opacity:1" />
+      <stop offset="50%" style="stop-color:#06B6D4;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#8B5CF6;stop-opacity:1" />
+    </linearGradient>
+
+    <linearGradient id="pointBorder" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#06B6D4;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#3B82F6;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+</svg>
