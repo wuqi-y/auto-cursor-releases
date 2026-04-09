@@ -139,6 +139,9 @@ auto-cursor/
 2. 提交清晰的 commit message
 3. 提交 PR，说明变更背景、方案与测试结果
 
+## 社区交流
+论坛：[linux.do](https://linux.do)
+
 ## 开源许可证
 
 `MIT License`
