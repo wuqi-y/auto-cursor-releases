@@ -70,27 +70,27 @@ python manual_register.py test@example.com
 #   cancel_file:   cdp_flow_cancel.txt    创建该文件即可取消
 cd "E:\前端\auto-cursor-vip\src-tauri\python_scripts"
 
-python cdp_flow_runner.py `
-  --url "https://chatgpt.com/" `
-  --click "css:button[class*='btn-secondary']" `
-  --input "css:input#email=xx.sow.7z@icloud.com" `
-  --click "css:button[type='submit']" `
-  --input "css:input[type='password']=AUTOCURSOR1234" `
-  --click "css:button[type='submit']" `
-  --input "@name=otp=__AUTO__" `
-  --element-timeout 20 `
-  --wait-after-action 1.8 `
-  --input "@name=name=__RANDOM_EN_NAME__" `
-  --click "css:button[type='submit']" `
-  --click "css:button[type='submit']" `
-  --input "@name=age=25" `
-  --click "css:button[type='submit']" `
-  --click "xpath://button[@type='submit' and (contains(normalize-space(.), 'Yes') or contains(normalize-space(.), '确定'))]" `
+python cdp_flow_runner.py \
+  --url "https://chatgpt.com/" \
+  --click "css:button[class*='btn-secondary']" \
+  --input "css:input#email=xx.sow.7z@icloud.com" \
+  --click "css:button[type='submit']" \
+  --input "css:input[type='password']=AUTOCURSOR1234" \
+  --click "css:button[type='submit']" \
+  --input "@name=otp=__AUTO__" \
+  --element-timeout 20 \
+  --wait-after-action 1.8 \
+  --input "@name=name=__RANDOM_EN_NAME__" \
+  --click "css:button[type='submit']" \
+  --click "css:button[type='submit']" \
+  --input "@name=age=25" \
+  --click "css:button[type='submit']" \
+  --click "xpath://button[@type='submit' and (contains(normalize-space(.), 'Yes') or contains(normalize-space(.), '确定'))]" \
   --post-oauth-step1-py "openai_oauth_step1.py"
 
 # 可选：CDP 流程结束后自动执行 OAuth Step1（生成 auth_url/state/verifier）
 # --post-oauth-step1-py "openai_oauth_step1.py"
-```
+\``
 
 ### OAuth Step1（可单独运行）
 

@@ -76,6 +76,8 @@ export interface ConfigData {
   codexSelfHostedMailClearHeadersJson?: CacheItem<string>;
   /** Codex 自建邮箱 API：清空邮箱请求 Method */
   codexSelfHostedMailClearMethod?: CacheItem<string>;
+  /** Codex 注册时的 CDP 流程覆盖配置（JSON 字符串） */
+  codexCdpOverridesJson?: CacheItem<string>;
 
   registrationProvider?: CacheItem<RegistrationProvider>;
   themeMode?: CacheItem<ThemeMode>;
@@ -170,6 +172,8 @@ interface ConfigStore {
   getCodexSelfHostedMailClearHeadersJson: () => string | null;
   setCodexSelfHostedMailClearMethod: (method: string, expiresIn?: number) => void;
   getCodexSelfHostedMailClearMethod: () => string | null;
+  setCodexCdpOverridesJson: (json: string, expiresIn?: number) => void;
+  getCodexCdpOverridesJson: () => string | null;
 
   setRegistrationProvider: (provider: RegistrationProvider, expiresIn?: number) => void;
   getRegistrationProvider: () => RegistrationProvider | null;
@@ -208,6 +212,7 @@ const DEFAULT_EXPIRY = {
   codexSelfHostedMailClearUrl: undefined,
   codexSelfHostedMailClearHeadersJson: undefined,
   codexSelfHostedMailClearMethod: undefined,
+  codexCdpOverridesJson: undefined,
   registrationProvider: undefined,
   themeMode: undefined,
 };
@@ -537,6 +542,15 @@ export const useConfigStore = create<ConfigStore>()(
       },
       getCodexSelfHostedMailClearMethod: () =>
         get().getCache<string>('codexSelfHostedMailClearMethod'),
+
+      setCodexCdpOverridesJson: (
+        json: string,
+        expiresIn = DEFAULT_EXPIRY.codexCdpOverridesJson
+      ) => {
+        get().setCache('codexCdpOverridesJson', json, expiresIn);
+      },
+      getCodexCdpOverridesJson: () =>
+        get().getCache<string>('codexCdpOverridesJson'),
 
       setRegistrationProvider: (
         provider: RegistrationProvider,

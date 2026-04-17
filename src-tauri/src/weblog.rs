@@ -82,7 +82,10 @@ impl WebLogger {
         // 如果logger未初始化，尝试延迟初始化
         if let Err(_) = Self::lazy_init() {
             // 初始化失败，回退到控制台输出
-            println!("[WEBLOG] [{}] [{}] {}", entry.timestamp, entry.level, entry.message);
+            println!(
+                "[WEBLOG] [{}] [{}] {}",
+                entry.timestamp, entry.level, entry.message
+            );
             return;
         }
 
@@ -223,8 +226,9 @@ impl WebLogger {
 
     /// 读取最近的Web日志条目
     pub fn get_recent_weblogs(limit: usize) -> Result<Vec<String>> {
-        let log_path = Self::get_weblog_path().ok_or_else(|| anyhow::anyhow!("Web logger not initialized"))?;
-        
+        let log_path =
+            Self::get_weblog_path().ok_or_else(|| anyhow::anyhow!("Web logger not initialized"))?;
+
         if !log_path.exists() {
             return Ok(vec![]);
         }
@@ -232,13 +236,13 @@ impl WebLogger {
         let file = File::open(&log_path)?;
         let reader = BufReader::new(file);
         let lines: Vec<String> = reader.lines().collect::<Result<Vec<_>, _>>()?;
-        
+
         let start_index = if lines.len() > limit {
             lines.len() - limit
         } else {
             0
         };
-        
+
         Ok(lines[start_index..].to_vec())
     }
 }

@@ -1,16 +1,17 @@
+use rand::Rng;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256, Sha512};
 use std::convert::Infallible;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::Emitter;
 use tokio::sync::RwLock;
 use tokio::time;
-use warp::Filter;
-use rand::Rng;
-use sha2::{Digest, Sha256, Sha512};
 use uuid::Uuid;
+use warp::Filter;
 
 use crate::{get_app_dir, log_error, log_info, log_warn};
 
@@ -81,6 +82,8 @@ static LAST_ERROR_TIME: once_cell::sync::Lazy<Arc<RwLock<u64>>> =
 // 缓存符合条件的账户（试用版和Pro及以上）
 static ELIGIBLE_ACCOUNTS_CACHE: once_cell::sync::Lazy<Arc<RwLock<Vec<(String, String)>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(RwLock::new(Vec::new())));
+static AUTO_SWITCH_CONFIG_MISSING_LOGGED: AtomicBool = AtomicBool::new(false);
+static SEAMLESS_SWITCH_CONFIG_MISSING_LOGGED: AtomicBool = AtomicBool::new(false);
 
 // Web服务器结构
 pub struct NextWorkWebServer {
@@ -109,6 +112,7 @@ impl NextWorkWebServer {
         let config_path = Self::get_auto_switch_config_path()?;
 
         if config_path.exists() {
+            AUTO_SWITCH_CONFIG_MISSING_LOGGED.store(false, Ordering::Relaxed);
             match fs::read_to_string(&config_path) {
                 Ok(content) => {
                     if content.trim().is_empty() {
@@ -136,7 +140,9 @@ impl NextWorkWebServer {
                 }
             }
         } else {
-            log_info!("ℹ️ [AUTO_SWITCH] 自动轮换配置文件不存在，返回默认配置");
+            if !AUTO_SWITCH_CONFIG_MISSING_LOGGED.swap(true, Ordering::Relaxed) {
+                log_info!("ℹ️ [AUTO_SWITCH] 自动轮换配置文件不存在，返回默认配置");
+            }
             Ok(AutoSwitchConfig::default())
         }
     }
@@ -206,9 +212,7 @@ impl NextWorkWebServer {
                                         return Ok(Some((email, token)));
                                     }
                                 }
-
                             }
-
                         }
 
                         Ok(None)
@@ -245,6 +249,7 @@ impl NextWorkWebServer {
         let config_path = Self::get_config_path()?;
 
         if config_path.exists() {
+            SEAMLESS_SWITCH_CONFIG_MISSING_LOGGED.store(false, Ordering::Relaxed);
             match fs::read_to_string(&config_path) {
                 Ok(content) => {
                     if content.trim().is_empty() {
@@ -272,7 +277,9 @@ impl NextWorkWebServer {
                 }
             }
         } else {
-            log_info!("ℹ️ [WEB] 无感换号配置文件不存在，返回默认配置");
+            if !SEAMLESS_SWITCH_CONFIG_MISSING_LOGGED.swap(true, Ordering::Relaxed) {
+                log_info!("ℹ️ [WEB] 无感换号配置文件不存在，返回默认配置");
+            }
             Ok(SeamlessSwitchStatus::default())
         }
     }
@@ -288,7 +295,11 @@ impl NextWorkWebServer {
                         "💾 [WEB] 无感换号配置保存成功: token={}..., isSwitch={}, machineIds={}",
                         &config.access_token[..config.access_token.len().min(20)],
                         config.is_switch,
-                        if config.machine_ids.is_some() { "已设置" } else { "未设置" }
+                        if config.machine_ids.is_some() {
+                            "已设置"
+                        } else {
+                            "未设置"
+                        }
                     );
                     Ok(())
                 }
@@ -332,7 +343,12 @@ impl NextWorkWebServer {
     }
 
     // 更新无感换号token并设置切换状态
-    pub async fn update_seamless_switch_token(access_token: String, email: String, is_auto_switch: bool, reset_machine_id: bool) -> Result<(), String> {
+    pub async fn update_seamless_switch_token(
+        access_token: String,
+        email: String,
+        is_auto_switch: bool,
+        reset_machine_id: bool,
+    ) -> Result<(), String> {
         log_info!(
             "🔄 [WEB] 开始更新无感换号token，长度: {}, email: {}, reset_machine_id: {}",
             access_token.len(),
@@ -363,7 +379,11 @@ impl NextWorkWebServer {
         config.is_switch = 1; // 标记为需要切换
         config.email = Some(email.clone()); // 设置邮箱
 
-        let machine_ids_status = if reset_machine_id { "机器ID已生成" } else { "保持原有机器ID" };
+        let machine_ids_status = if reset_machine_id {
+            "机器ID已生成"
+        } else {
+            "保持原有机器ID"
+        };
         log_info!(
             "🔄 [WEB] 准备写入新配置: isSwitch=1, token={}..., email={}, {}",
             &access_token[..access_token.len().min(20)],
@@ -373,7 +393,10 @@ impl NextWorkWebServer {
 
         Self::write_seamless_switch_config(&config).await?;
 
-        log_info!("✅ [WEB] 无感换号配置写入成功，isSwitch已设置为1，{}，邮箱已设置", machine_ids_status);
+        log_info!(
+            "✅ [WEB] 无感换号配置写入成功，isSwitch已设置为1，{}，邮箱已设置",
+            machine_ids_status
+        );
 
         // 启动异步任务，10秒后将is_switch重置为0
         tokio::spawn(async move {
@@ -387,7 +410,7 @@ impl NextWorkWebServer {
                             log_error!("❌ [WEB] 自动重置切换状态失败: {}", e);
                         } else {
                             log_info!("✅ [WEB] 10秒后自动重置：切换状态已重置为0");
-                            
+
                             // 只在自动轮换时才发射事件通知前端
                             if is_auto_switch {
                                 if let Some(app_handle) = crate::APP_HANDLE.get() {
@@ -396,8 +419,9 @@ impl NextWorkWebServer {
                                         "message": "自动轮换账户成功",
                                         "timestamp": chrono::Utc::now().timestamp()
                                     });
-                                    
-                                    if let Err(e) = app_handle.emit("auto-switch-success", &payload) {
+
+                                    if let Err(e) = app_handle.emit("auto-switch-success", &payload)
+                                    {
                                         log_error!("❌ [WEB] 发射自动轮换成功事件失败: {}", e);
                                     } else {
                                         log_info!("✅ [WEB] 已通知前端自动轮换成功");
@@ -549,7 +573,14 @@ async fn handle_update_seamless_switch_token(
     );
 
     // HTTP API调用默认重置机器ID以确保安全性
-    match NextWorkWebServer::update_seamless_switch_token(request.access_token, request.email, false, true).await {
+    match NextWorkWebServer::update_seamless_switch_token(
+        request.access_token,
+        request.email,
+        false,
+        true,
+    )
+    .await
+    {
         Ok(_) => {
             log_info!("✅ [WEB] 无感换号token更新成功");
             let response = serde_json::json!({
@@ -729,33 +760,36 @@ async fn trigger_auto_switch() -> Result<(), String> {
     // 3. 优先检查手动配置的账户（如果启用了手动配置模式）
     if config.manual_config_enabled {
         log_info!("🎯 [AUTO_SWITCH] 手动配置模式已启用，优先使用手动配置的账户");
-        
+
         // 获取所有账户并筛选出手动配置的账户
         use crate::account_manager::AccountManager;
         let accounts_result = AccountManager::get_account_list();
-        
+
         if accounts_result.success {
-            let manual_accounts: Vec<_> = accounts_result.accounts
+            let manual_accounts: Vec<_> = accounts_result
+                .accounts
                 .into_iter()
                 .filter(|account| account.is_auto_switch == Some(true))
                 .collect();
-            
+
             if !manual_accounts.is_empty() {
                 log_info!(
                     "📋 [AUTO_SWITCH] 找到 {} 个手动配置的账户，直接使用第一个",
                     manual_accounts.len()
                 );
-                
+
                 let target_account = &manual_accounts[0];
                 log_info!(
                     "🎯 [AUTO_SWITCH] 使用手动配置的账户: {}，立即切换！",
                     target_account.email
                 );
-                
+
                 // 立即执行切换并返回
                 return perform_account_switch(&target_account.email).await;
             } else {
-                log_warn!("⚠️ [AUTO_SWITCH] 手动配置模式已启用，但没有找到配置的账户，回退到自动模式");
+                log_warn!(
+                    "⚠️ [AUTO_SWITCH] 手动配置模式已启用，但没有找到配置的账户，回退到自动模式"
+                );
             }
         } else {
             log_warn!("⚠️ [AUTO_SWITCH] 无法获取账户列表，回退到自动模式");
@@ -998,7 +1032,13 @@ async fn perform_account_switch(email: &str) -> Result<(), String> {
         .ok_or_else(|| format!("找不到账户: {}", email))?;
 
     // 更新无感换号 token (自动轮换模式，默认重置机器ID)
-    NextWorkWebServer::update_seamless_switch_token(target_account.token.clone(), email.to_string(), true, true).await?;
+    NextWorkWebServer::update_seamless_switch_token(
+        target_account.token.clone(),
+        email.to_string(),
+        true,
+        true,
+    )
+    .await?;
 
     log_info!("✅ [AUTO_SWITCH] 无感换号配置已更新");
 
@@ -1016,14 +1056,8 @@ async fn perform_account_switch(email: &str) -> Result<(), String> {
         }
         if cleared {
             match AccountManager::save_account_list(&accounts) {
-                Ok(_) => log_info!(
-                    "✅ [AUTO_SWITCH] 已清除账户 {} 的自动轮换标识",
-                    email
-                ),
-                Err(e) => log_warn!(
-                    "⚠️ [AUTO_SWITCH] 清除自动轮换标识后保存账户列表失败: {}",
-                    e
-                ),
+                Ok(_) => log_info!("✅ [AUTO_SWITCH] 已清除账户 {} 的自动轮换标识", email),
+                Err(e) => log_warn!("⚠️ [AUTO_SWITCH] 清除自动轮换标识后保存账户列表失败: {}", e),
             }
         }
     }

@@ -170,7 +170,7 @@ impl AccountManager {
     pub fn get_current_account() -> Result<Option<AccountInfo>> {
         // Try to get current token from Cursor
         let current_token = Self::get_current_token();
-        
+
         if let Some(token) = current_token {
             // Load account list and find by token
             match Self::load_accounts() {
@@ -181,7 +181,7 @@ impl AccountManager {
                         account.is_current = true;
                         return Ok(Some(account));
                     }
-                    
+
                     // If not found in list, try to get email and create basic account info
                     if let Some(email) = Self::get_current_email() {
                         Ok(Some(AccountInfo {
@@ -190,7 +190,9 @@ impl AccountManager {
                             refresh_token: None,
                             workos_cursor_session_token: None,
                             is_current: true,
-                            created_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                            created_at: chrono::Local::now()
+                                .format("%Y-%m-%d %H:%M:%S")
+                                .to_string(),
                             is_auto_switch: None,
                             custom_tags: None,
                         }))
@@ -207,7 +209,9 @@ impl AccountManager {
                             refresh_token: None,
                             workos_cursor_session_token: None,
                             is_current: true,
-                            created_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                            created_at: chrono::Local::now()
+                                .format("%Y-%m-%d %H:%M:%S")
+                                .to_string(),
                             is_auto_switch: None,
                             custom_tags: None,
                         }))
@@ -245,7 +249,7 @@ impl AccountManager {
     /// Get email from storage.json
     fn get_email_from_storage() -> Option<String> {
         use fs2::FileExt;
-        
+
         let (storage_path, _) = Self::get_cursor_paths().ok()?;
 
         if !storage_path.exists() {
@@ -255,7 +259,7 @@ impl AccountManager {
         // 使用共享锁进行读取操作
         let file = fs::File::open(&storage_path).ok()?;
         file.lock_shared().ok()?;
-        
+
         let content = fs::read_to_string(&storage_path).ok()?;
         let storage_data: serde_json::Value = serde_json::from_str(&content).ok()?;
 
@@ -1561,7 +1565,7 @@ impl AccountManager {
     /// Update storage.json with new email and token (CRITICAL for authentication!)
     fn update_storage_json(email: &str, token: &str) -> Result<()> {
         use fs2::FileExt;
-        
+
         log_info!(
             "🔍 [DEBUG] Updating storage.json with email: {}, token length: {}",
             email,
@@ -1584,10 +1588,10 @@ impl AccountManager {
             .read(true)
             .write(true)
             .open(&storage_path)?;
-        
+
         log_debug!("🔒 [DEBUG] Acquiring exclusive lock on storage.json");
         file.lock_exclusive()?;
-        
+
         let content = fs::read_to_string(&storage_path)?;
         let mut data: serde_json::Value = serde_json::from_str(&content)?;
         log_info!("✅ [DEBUG] Successfully read and parsed storage.json (with lock)");
@@ -1641,7 +1645,7 @@ impl AccountManager {
         let updated_content = serde_json::to_string_pretty(&data)?;
         fs::write(&storage_path, updated_content)?;
         log_info!("✅ [DEBUG] Successfully wrote updated storage.json");
-        
+
         // 文件锁会在 file 变量离开作用域时自动释放
         file.unlock()?;
         log_debug!("🔓 [DEBUG] Released exclusive lock on storage.json");
@@ -1868,10 +1872,7 @@ impl AccountManager {
     }
 
     /// Update custom tags for an account
-    pub fn update_custom_tags(
-        email: String,
-        custom_tags: Vec<CustomTag>,
-    ) -> Result<()> {
+    pub fn update_custom_tags(email: String, custom_tags: Vec<CustomTag>) -> Result<()> {
         log_info!(
             "🔍 [DEBUG] AccountManager::update_custom_tags called for email: {}",
             email

@@ -1,11 +1,10 @@
 mod account_manager;
 mod auth_checker;
-mod logger;
-mod weblog;
-mod machine_id;
 mod cursor_info;
+mod logger;
+mod machine_id;
 mod other;
-
+mod weblog;
 
 use account_manager::{AccountListResult, AccountManager, LogoutResult, SwitchAccountResult};
 use auth_checker::{AuthCheckResult, AuthChecker, TokenInfo};
@@ -17,13 +16,15 @@ use rand::{Rng, distributions::Alphanumeric};
 use regex::Regex;
 use reqwest;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+#[cfg(not(target_os = "windows"))]
+use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio, Child};
-use tauri::{Emitter, Manager, Window, AppHandle};
-use std::sync::{OnceLock, Arc, Mutex};
-use std::collections::HashMap;
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex, OnceLock};
+use tauri::{AppHandle, Emitter, Manager, Window};
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -35,7 +36,8 @@ pub static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
 // key: task_id (生成自email), value: 进程ID (PID)
 use once_cell::sync::Lazy;
 
-static REGISTRATION_PROCESSES: Lazy<Arc<Mutex<HashMap<String, u32>>>> = Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
+static REGISTRATION_PROCESSES: Lazy<Arc<Mutex<HashMap<String, u32>>>> =
+    Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
 static ANSI_ESCAPE_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"\x1B\[[0-9;?]*[ -/]*[@-~]").unwrap());
 
@@ -43,13 +45,17 @@ static ANSI_ESCAPE_RE: Lazy<Regex> =
 // 备份功能已迁移到 cursor_backup.rs 模块
 
 mod cursor_backup;
-pub use cursor_backup::{get_cursor_backup_info, backup_cursor_data, restore_cursor_data, get_backup_list, cancel_backup, delete_cursor_backup, open_cursor_settings_dir, open_cursor_workspace_dir, open_backup_dir, open_directory_by_path, get_workspace_storage_items, get_workspace_details, debug_workspace_sqlite, get_conversation_detail};
+pub use cursor_backup::{
+    backup_cursor_data, cancel_backup, debug_workspace_sqlite, delete_cursor_backup,
+    get_backup_list, get_conversation_detail, get_cursor_backup_info, get_workspace_details,
+    get_workspace_storage_items, open_backup_dir, open_cursor_settings_dir,
+    open_cursor_workspace_dir, open_directory_by_path, restore_cursor_data,
+};
 
 mod next_work_web;
-pub use next_work_web::{NextWorkWebServer};
+pub use next_work_web::NextWorkWebServer;
 
 mod tray;
-
 
 // 日志宏现在在logger.rs中定义
 
@@ -80,22 +86,242 @@ fn create_hidden_command(executable_path: &str) -> Command {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn terminate_process_tree(pid: u32) -> bool {
+    match Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .output()
+    {
+        Ok(output) => output.status.success(),
+        Err(_) => false,
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn collect_process_descendants(pid: u32, visited: &mut HashSet<u32>, descendants: &mut Vec<u32>) {
+    let output = match Command::new("pgrep")
+        .args(["-P", &pid.to_string()])
+        .output()
+    {
+        Ok(output) => output,
+        Err(_) => return,
+    };
+
+    if !output.status.success() {
+        return;
+    }
+
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let child_pid = match trimmed.parse::<u32>() {
+            Ok(child_pid) => child_pid,
+            Err(_) => continue,
+        };
+
+        if visited.insert(child_pid) {
+            collect_process_descendants(child_pid, visited, descendants);
+            descendants.push(child_pid);
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn send_unix_signal(pid: u32, signal: &str) -> bool {
+    match Command::new("kill")
+        .args([signal, &pid.to_string()])
+        .output()
+    {
+        Ok(output) => output.status.success(),
+        Err(_) => false,
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn terminate_process_tree(pid: u32) -> bool {
+    let mut visited = HashSet::new();
+    let mut targets = Vec::new();
+    collect_process_descendants(pid, &mut visited, &mut targets);
+    targets.push(pid);
+    targets.sort_unstable();
+    targets.dedup();
+    targets.reverse();
+
+    let mut terminated = false;
+
+    for target in &targets {
+        if send_unix_signal(*target, "-TERM") {
+            terminated = true;
+        }
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(350));
+
+    for target in &targets {
+        if send_unix_signal(*target, "-KILL") {
+            terminated = true;
+        }
+    }
+
+    terminated
+}
+
 // 生成唯一的任务ID（用于并行注册时隔离验证码文件）
 fn generate_task_id(email: &str) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     use std::time::{SystemTime, UNIX_EPOCH};
-    
+
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_millis();
-    
+
     let mut hasher = DefaultHasher::new();
     email.hash(&mut hasher);
     timestamp.hash(&mut hasher);
-    
+
     format!("{:x}", hasher.finish())
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexCdpOverrides {
+    url: Option<String>,
+    steps: Option<Vec<CodexCdpStep>>,
+    wait_after_open: Option<f64>,
+    wait_after_action: Option<f64>,
+    element_timeout: Option<f64>,
+    post_oauth_step1_py: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexCdpStep {
+    #[serde(rename = "type")]
+    step_type: String,
+    selector: String,
+    value: Option<String>,
+    wait_for_load: Option<bool>,
+}
+
+#[derive(Debug, Clone)]
+enum CodexCdpCliStep {
+    Click {
+        selector: String,
+        wait_for_load: bool,
+    },
+    Input { selector: String, value: String },
+}
+
+fn default_codex_cdp_cli_steps(email: &str, access_password: &str) -> Vec<CodexCdpCliStep> {
+    vec![
+        CodexCdpCliStep::Click {
+            selector: "css:button[class*='btn-secondary']".to_string(),
+            wait_for_load: false,
+        },
+        CodexCdpCliStep::Input {
+            selector: "css:input#email".to_string(),
+            value: email.to_string(),
+        },
+        CodexCdpCliStep::Click {
+            selector: "css:button[type='submit']".to_string(),
+            wait_for_load: false,
+        },
+        CodexCdpCliStep::Input {
+            selector: "css:input[type='password']".to_string(),
+            value: access_password.to_string(),
+        },
+        CodexCdpCliStep::Click {
+            selector: "css:button[type='submit']".to_string(),
+            wait_for_load: false,
+        },
+        CodexCdpCliStep::Input {
+            selector: "@name=otp".to_string(),
+            value: "__AUTO__".to_string(),
+        },
+        CodexCdpCliStep::Input {
+            selector: "@name=name".to_string(),
+            value: "__RANDOM_EN_NAME__".to_string(),
+        },
+        CodexCdpCliStep::Click {
+            selector: "css:button[type='submit']".to_string(),
+            wait_for_load: false,
+        },
+        CodexCdpCliStep::Click {
+            selector: "css:button[type='submit']".to_string(),
+            wait_for_load: false,
+        },
+        CodexCdpCliStep::Input {
+            selector: "@name=age".to_string(),
+            value: "25".to_string(),
+        },
+        CodexCdpCliStep::Click {
+            selector: "@name=allCheckboxes".to_string(),
+            wait_for_load: false,
+        },
+        CodexCdpCliStep::Click {
+            selector: "css:button[type='submit']".to_string(),
+            wait_for_load: false,
+        },
+        CodexCdpCliStep::Click {
+            selector:
+                "xpath://button[@type='submit' and (contains(normalize-space(.), 'Yes') or contains(normalize-space(.), '确定'))]"
+                    .to_string(),
+            wait_for_load: false,
+        },
+    ]
+}
+
+fn resolve_codex_cdp_step_value(value: &str, email: &str, access_password: &str) -> String {
+    match value.trim() {
+        "__REGISTER_EMAIL__" => email.to_string(),
+        "__ACCESS_PASSWORD__" => access_password.to_string(),
+        _ => value.to_string(),
+    }
+}
+
+fn parse_codex_cdp_cli_steps(
+    steps: &[CodexCdpStep],
+    email: &str,
+    access_password: &str,
+) -> Result<Vec<CodexCdpCliStep>, String> {
+    let mut parsed_steps = Vec::with_capacity(steps.len());
+
+    for (index, step) in steps.iter().enumerate() {
+        let selector = step.selector.trim();
+        if selector.is_empty() {
+            return Err(format!("Codex CDP steps[{}].selector 不能为空", index));
+        }
+
+        match step.step_type.trim() {
+            "click" => parsed_steps.push(CodexCdpCliStep::Click {
+                selector: selector.to_string(),
+                wait_for_load: step.wait_for_load.unwrap_or(false),
+            }),
+            "input" => {
+                let value = step
+                    .value
+                    .clone()
+                    .ok_or_else(|| format!("Codex CDP steps[{}].value 不能为空", index))?;
+                parsed_steps.push(CodexCdpCliStep::Input {
+                    selector: selector.to_string(),
+                    value: resolve_codex_cdp_step_value(&value, email, access_password),
+                });
+            }
+            other => {
+                return Err(format!(
+                    "Codex CDP steps[{}].type 不支持: {}，仅支持 click / input",
+                    index, other
+                ));
+            }
+        }
+    }
+
+    Ok(parsed_steps)
 }
 
 // 递归复制目录的辅助函数
@@ -167,7 +393,10 @@ fn get_python_executable_path_by_name(executable_name: &str) -> Result<PathBuf, 
     };
 
     if cfg!(debug_assertions) {
-        Ok(get_app_dir()?.join("pyBuild").join(platform).join(&exe_name))
+        Ok(get_app_dir()?
+            .join("pyBuild")
+            .join(platform)
+            .join(&exe_name))
     } else {
         let current_exe =
             std::env::current_exe().map_err(|e| format!("无法获取当前执行文件路径: {}", e))?;
@@ -199,12 +428,8 @@ fn sanitize_python_output_line(line: &str) -> String {
     // 控制台编码降级时，emoji 常被替换成前缀 "? "，这里做展示层修正。
     if let Some(rest) = cleaned.strip_prefix("? ") {
         let rest = rest.trim_start();
-        let strip_prefix = rest.starts_with('[')
-            || rest
-                .chars()
-                .next()
-                .map(|c| !c.is_ascii())
-                .unwrap_or(false);
+        let strip_prefix =
+            rest.starts_with('[') || rest.chars().next().map(|c| !c.is_ascii()).unwrap_or(false);
         if strip_prefix {
             cleaned = rest.to_string();
         }
@@ -315,7 +540,9 @@ async fn create_cloudflare_temp_email() -> Result<(String, String), String> {
 
     log_debug!("创建邮箱请求详情:");
     log_debug!("  URL: {}", url);
-    log_debug!("  Headers: x-admin-auth=[hidden], x-custom-auth=[hidden], Content-Type=application/json");
+    log_debug!(
+        "  Headers: x-admin-auth=[hidden], x-custom-auth=[hidden], Content-Type=application/json"
+    );
     log_debug!(
         "  Payload: {}",
         serde_json::to_string_pretty(&payload).unwrap_or_default()
@@ -464,114 +691,163 @@ async fn get_verification_code_from_tempmail(
     register_email: &str,
 ) -> Result<String, String> {
     let client = reqwest::Client::new();
-    
+
     // 最多10轮查找，每轮查10个邮件，间隔12秒（总共约2分钟）
     for round in 1..=10 {
         log_info!("🔍 第{}轮从tempmail获取验证码...", round);
-        
+
         // 获取邮件列表
         let encoded_email = urlencoding::encode(tempmail_email);
         let url = format!(
             "https://tempmail.plus/api/mails?email={}&limit=10&epin={}",
             encoded_email, pin
         );
-        
+
         log_debug!("🔍 [DEBUG] Tempmail请求详情:");
         log_info!("  URL: {}", url);
-        
+
         let response = client
             .get(&url)
             .send()
             .await
             .map_err(|e| format!("获取tempmail邮件列表失败: {}", e))?;
-            
+
         let status = response.status();
         log_debug!("🔍 [DEBUG] Tempmail响应状态码: {}", status);
-        
+
         if response.status().is_success() {
             let response_text = response
                 .text()
                 .await
                 .map_err(|e| format!("读取tempmail响应文本失败: {}", e))?;
-                
+
             log_debug!("🔍 [DEBUG] Tempmail响应体: {}", response_text);
-            
-            let data: TempmailResponse = serde_json::from_str(&response_text)
-                .map_err(|e| format!("解析tempmail响应JSON失败: {} | 响应内容: {}", e, response_text))?;
-                
+
+            let data: TempmailResponse = serde_json::from_str(&response_text).map_err(|e| {
+                format!(
+                    "解析tempmail响应JSON失败: {} | 响应内容: {}",
+                    e, response_text
+                )
+            })?;
+
             if data.result && !data.mail_list.is_empty() {
-                log_info!("🔍 第{}轮找到 {} 封邮件，开始检查验证码...", round, data.mail_list.len());
-                
+                log_info!(
+                    "🔍 第{}轮找到 {} 封邮件，开始检查验证码...",
+                    round,
+                    data.mail_list.len()
+                );
+
                 // 查找验证码（最多查看前10封邮件）
                 for (index, mail) in data.mail_list.iter().take(10).enumerate() {
-                    log_debug!("🔍 [DEBUG] 检查第{}封邮件: from={}, subject={}", 
-                        index + 1, mail.from_mail, mail.subject);
-                        
+                    log_debug!(
+                        "🔍 [DEBUG] 检查第{}封邮件: from={}, subject={}",
+                        index + 1,
+                        mail.from_mail,
+                        mail.subject
+                    );
+
                     // 获取邮件详情
                     let detail_url = format!(
                         "https://tempmail.plus/api/mails/{}?email={}&epin={}",
                         mail.mail_id, encoded_email, pin
                     );
-                    
+
                     log_debug!("🔍 [DEBUG] 获取邮件详情: {}", detail_url);
-                    
+
                     let detail_response = client
                         .get(&detail_url)
                         .send()
                         .await
                         .map_err(|e| format!("获取tempmail邮件详情失败: {}", e))?;
-                        
+
                     if detail_response.status().is_success() {
                         let detail_text = detail_response
                             .text()
                             .await
                             .map_err(|e| format!("读取tempmail详情响应失败: {}", e))?;
-                            
+
                         log_debug!("🔍 [DEBUG] 邮件详情响应: {}", detail_text);
-                        
-                        let detail_data: TempmailDetailResponse = serde_json::from_str(&detail_text)
-                            .map_err(|e| format!("解析tempmail详情JSON失败: {} | 响应内容: {}", e, detail_text))?;
-                            
+
+                        let detail_data: TempmailDetailResponse =
+                            serde_json::from_str(&detail_text).map_err(|e| {
+                                format!(
+                                    "解析tempmail详情JSON失败: {} | 响应内容: {}",
+                                    e, detail_text
+                                )
+                            })?;
+
                         if detail_data.result {
                             // 检查HTML内容是否包含注册邮箱
                             if detail_data.html.contains(register_email) {
-                                log_debug!("🔍 [DEBUG] 第{}轮第{}封邮件包含注册邮箱 {}，开始提取验证码", round, index + 1, register_email);
-                         
+                                log_debug!(
+                                    "🔍 [DEBUG] 第{}轮第{}封邮件包含注册邮箱 {}，开始提取验证码",
+                                    round,
+                                    index + 1,
+                                    register_email
+                                );
+
                                 // 如果HTML中没有找到，尝试从text中提取
-                                if let Ok(verification_code) = extract_verification_code_from_text(&detail_data.text) {
-                                    log_info!("✅ 第{}轮第{}封邮件成功从文本提取验证码: {}", round, index + 1, verification_code);
+                                if let Ok(verification_code) =
+                                    extract_verification_code_from_text(&detail_data.text)
+                                {
+                                    log_info!(
+                                        "✅ 第{}轮第{}封邮件成功从文本提取验证码: {}",
+                                        round,
+                                        index + 1,
+                                        verification_code
+                                    );
                                     return Ok(verification_code);
                                 }
 
                                 // 从HTML内容中提取验证码
-                                if let Some(verification_code) = extract_verification_code_from_content(&detail_data.html) {
-                                    log_info!("✅ 第{}轮第{}封邮件成功提取验证码: {}", round, index + 1, verification_code);
+                                if let Some(verification_code) =
+                                    extract_verification_code_from_content(&detail_data.html)
+                                {
+                                    log_info!(
+                                        "✅ 第{}轮第{}封邮件成功提取验证码: {}",
+                                        round,
+                                        index + 1,
+                                        verification_code
+                                    );
                                     return Ok(verification_code);
                                 }
-                                
-                                log_debug!("🔍 [DEBUG] 第{}轮第{}封邮件包含注册邮箱但未找到验证码", round, index + 1);
+
+                                log_debug!(
+                                    "🔍 [DEBUG] 第{}轮第{}封邮件包含注册邮箱但未找到验证码",
+                                    round,
+                                    index + 1
+                                );
                             } else {
-                                log_debug!("🔍 [DEBUG] 第{}轮第{}封邮件不包含注册邮箱 {}，跳过", round, index + 1, register_email);
+                                log_debug!(
+                                    "🔍 [DEBUG] 第{}轮第{}封邮件不包含注册邮箱 {}，跳过",
+                                    round,
+                                    index + 1,
+                                    register_email
+                                );
                             }
                         }
                     }
                 }
-                
+
                 log_info!("🔍 第{}轮未找到验证码，本轮检查完毕", round);
             } else {
                 log_info!("🔍 第{}轮暂无邮件或请求失败", round);
             }
         } else {
-            log_debug!("🔍 [DEBUG] 第{}轮Tempmail API请求失败，状态码: {}", round, status);
+            log_debug!(
+                "🔍 [DEBUG] 第{}轮Tempmail API请求失败，状态码: {}",
+                round,
+                status
+            );
         }
-        
+
         // 如果不是最后一轮，等待12秒后重试
         if round < 10 {
             log_info!("⏳ 等待12秒后进行第{}轮查找...", round + 1);
             tokio::time::sleep(tokio::time::Duration::from_secs(12)).await;
         }
     }
-    
+
     log_info!("❌ 10轮查找均未找到验证码（总时长约2分钟），需要用户手动输入");
     Err("从tempmail获取验证码失败，已尝试10轮查找（约2分钟），请手动输入验证码".to_string())
 }
@@ -581,10 +857,10 @@ fn extract_verification_code_from_text(text: &str) -> Result<String, String> {
     // 尝试多种正则表达式模式
     let patterns = vec![
         // 匹配\n \n604152\n\n中的数字
-        r"\n(\d{6})\n", 
-        r"\b(\d{6})\b",  // 最后尝试任意6位数字
+        r"\n(\d{6})\n",
+        r"\b(\d{6})\b", // 最后尝试任意6位数字
     ];
-    
+
     for pattern in patterns {
         if let Ok(re) = Regex::new(pattern) {
             if let Some(captures) = re.captures(text) {
@@ -596,7 +872,7 @@ fn extract_verification_code_from_text(text: &str) -> Result<String, String> {
             }
         }
     }
-    
+
     Err("未能从文本中提取验证码".to_string())
 }
 
@@ -819,8 +1095,7 @@ fn json_navigate_one_segment<'a>(
         let arr = parent
             .as_array()
             .ok_or_else(|| format!("路径 {} 不是数组", if key.is_empty() { "根" } else { key }))?;
-        arr.get(idx)
-            .ok_or_else(|| format!("数组下标 {} 越界", idx))
+        arr.get(idx).ok_or_else(|| format!("数组下标 {} 越界", idx))
     } else if segment.chars().all(|c| c.is_ascii_digit()) {
         let idx: usize = segment
             .parse()
@@ -828,8 +1103,7 @@ fn json_navigate_one_segment<'a>(
         let arr = v
             .as_array()
             .ok_or_else(|| format!("当前节点不是数组，无法使用下标 {}", idx))?;
-        arr.get(idx)
-            .ok_or_else(|| format!("数组下标 {} 越界", idx))
+        arr.get(idx).ok_or_else(|| format!("数组下标 {} 越界", idx))
     } else {
         v.get(segment)
             .ok_or_else(|| format!("JSON路径不存在: {}", segment))
@@ -855,10 +1129,7 @@ fn json_value_to_mail_raw(v: &serde_json::Value) -> Result<String, String> {
     match v {
         serde_json::Value::String(s) => Ok(s.clone()),
         serde_json::Value::Null => Err("JSON路径指向 null".to_string()),
-        _ => Err(format!(
-            "JSON路径须指向字符串（邮件原文），当前为: {:?}",
-            v
-        )),
+        _ => Err(format!("JSON路径须指向字符串（邮件原文），当前为: {:?}", v)),
     }
 }
 
@@ -917,7 +1188,8 @@ async fn maybe_clear_self_hosted_mailbox(
     let clear_method = clear_method.unwrap_or("GET").trim();
 
     log_info!("🧹 [自建邮箱API] 获取验证码前先清空邮箱...");
-    let response = execute_self_hosted_mail_request(client, clear_method, clear_url, &clear_headers).await?;
+    let response =
+        execute_self_hosted_mail_request(client, clear_method, clear_url, &clear_headers).await?;
     let status = response.status();
     let response_text = response
         .text()
@@ -996,7 +1268,12 @@ async fn get_verification_code_from_self_hosted_mail_api(
                     Ok(raw) => {
                         let mut raw_candidate = raw;
                         if !register_email.is_empty() {
-                            let local = register_email.split('@').next().unwrap_or("").trim().to_string();
+                            let local = register_email
+                                .split('@')
+                                .next()
+                                .unwrap_or("")
+                                .trim()
+                                .to_string();
                             let is_email_matched = |text: &str| {
                                 let text_lower = text.to_lowercase();
                                 text_lower.contains(&register_email)
@@ -1010,17 +1287,28 @@ async fn get_verification_code_from_self_hosted_mail_api(
                                     register_email
                                 );
                                 // 不匹配时立即再拉一次，避免并行场景下取到别人的同批邮件。
-                                let retry_response =
-                                    execute_self_hosted_mail_request(&client, "GET", url, &headers_obj).await?;
+                                let retry_response = execute_self_hosted_mail_request(
+                                    &client,
+                                    "GET",
+                                    url,
+                                    &headers_obj,
+                                )
+                                .await?;
                                 let retry_status = retry_response.status();
                                 let retry_text = retry_response
                                     .text()
                                     .await
                                     .map_err(|e| format!("读取二次拉取响应失败: {}", e))?;
                                 if retry_status.is_success() {
-                                    if let Ok(retry_root) = serde_json::from_str::<serde_json::Value>(&retry_text) {
-                                        if let Ok(retry_leaf) = json_value_at_path(&retry_root, path) {
-                                            if let Ok(retry_raw) = json_value_to_mail_raw(retry_leaf) {
+                                    if let Ok(retry_root) =
+                                        serde_json::from_str::<serde_json::Value>(&retry_text)
+                                    {
+                                        if let Ok(retry_leaf) =
+                                            json_value_at_path(&retry_root, path)
+                                        {
+                                            if let Ok(retry_raw) =
+                                                json_value_to_mail_raw(retry_leaf)
+                                            {
                                                 if is_email_matched(&retry_raw) {
                                                     raw_candidate = retry_raw;
                                                 } else {
@@ -1048,7 +1336,9 @@ async fn get_verification_code_from_self_hosted_mail_api(
                             log_info!("✅ [自建邮箱API] 提取验证码成功: {}", code);
                             return Ok(code);
                         }
-                        log_debug!("🔍 [自建邮箱API] raw 中未匹配到验证码（仅 code is / 验证码为 / verification code / 清洗后6位）");
+                        log_debug!(
+                            "🔍 [自建邮箱API] raw 中未匹配到验证码（仅 code is / 验证码为 / verification code / 清洗后6位）"
+                        );
                     }
                     Err(e) => log_debug!("🔍 [自建邮箱API] 路径值无效: {}", e),
                 },
@@ -1097,8 +1387,8 @@ async fn extract_backup_ids(backup_path: String) -> Result<MachineIds, String> {
 async fn flash_window(window: Window) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        use winapi::um::winuser::{FlashWindow, FLASHW_ALL, FLASHW_TIMERNOFG};
-        
+        use winapi::um::winuser::{FLASHW_ALL, FLASHW_TIMERNOFG, FlashWindow};
+
         if let Ok(hwnd) = window.hwnd() {
             unsafe {
                 // 闪烁窗口直到用户关注
@@ -1106,36 +1396,38 @@ async fn flash_window(window: Window) -> Result<(), String> {
             }
         }
     }
-    
+
     #[cfg(target_os = "macos")]
     {
         use cocoa::appkit::{NSApp, NSRequestUserAttentionType};
         use cocoa::base::nil;
         use objc::runtime::Object;
         use objc::{msg_send, sel, sel_impl};
-        
+
         unsafe {
             let app: *mut Object = NSApp();
             if app != nil {
                 log_info!("🍎 [macOS] Requesting user attention - Dock icon should bounce");
-                
+
                 // 使用 objc 的 msg_send! 宏来正确调用 requestUserAttention 方法
                 let _: i32 = msg_send![app, requestUserAttention: NSRequestUserAttentionType::NSCriticalRequest];
-                
-                log_info!("🍎 [macOS] User attention request sent successfully - Dock should be bouncing!");
+
+                log_info!(
+                    "🍎 [macOS] User attention request sent successfully - Dock should be bouncing!"
+                );
             } else {
                 log_error!("🍎 [macOS] Failed to get NSApp instance");
             }
         }
     }
-    
+
     #[cfg(target_os = "linux")]
     {
         // Linux上尝试请求用户注意
         // 由于Tauri在Linux上的限制，我们使用一个简单的实现
         log_info!("Flash window requested on Linux (limited support)");
     }
-    
+
     Ok(())
 }
 
@@ -1323,9 +1615,11 @@ async fn write_weblog(
         url,
         user_agent,
         stack,
-        timestamp: chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
+        timestamp: chrono::Local::now()
+            .format("%Y-%m-%d %H:%M:%S%.3f")
+            .to_string(),
     };
-    
+
     weblog::WebLogger::write_weblog(&entry);
     Ok("Web log written successfully".to_string())
 }
@@ -1409,13 +1703,14 @@ async fn clear_custom_cursor_path() -> Result<String, String> {
 #[tauri::command]
 async fn select_browser_file(app: tauri::AppHandle) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
-    
-    let file_path = app.dialog()
+
+    let file_path = app
+        .dialog()
         .file()
         .set_title("选择浏览器可执行文件")
         .add_filter("可执行文件", &["exe"])
         .blocking_pick_file();
-    
+
     Ok(file_path.map(|path| path.to_string()))
 }
 
@@ -1590,7 +1885,6 @@ async fn get_subscription_info_only(token: String) -> Result<AuthCheckResult, St
         .map_err(|e| format!("Failed to get subscription info: {}", e))
 }
 
-
 #[tauri::command]
 async fn get_current_period_usage(token: String) -> Result<serde_json::Value, String> {
     other::get_current_period_usage_impl(&token)
@@ -1699,16 +1993,24 @@ async fn add_account(
 }
 
 #[tauri::command]
-async fn switch_account(email: String, auto_restart: Option<bool>, reset_machine_id: Option<bool>) -> Result<SwitchAccountResult, String> {
-    log_info!("🔄 Starting account switch to: {}, reset_machine_id: {:?}", email, reset_machine_id);
-    
+async fn switch_account(
+    email: String,
+    auto_restart: Option<bool>,
+    reset_machine_id: Option<bool>,
+) -> Result<SwitchAccountResult, String> {
+    log_info!(
+        "🔄 Starting account switch to: {}, reset_machine_id: {:?}",
+        email,
+        reset_machine_id
+    );
+
     // 检查是否启用了无感换号
     log_info!("🔍 [DEBUG] 开始检查无感换号状态...");
     let seamless_enabled = match MachineIdRestorer::check_seamless_switch_status() {
         Ok(enabled) => {
             log_info!("🔍 [DEBUG] 无感换号状态检查完成: {}", enabled);
             enabled
-        },
+        }
         Err(e) => {
             log_warn!("⚠️ [DEBUG] 检查无感换号状态失败: {}, 使用传统切换", e);
             false
@@ -1717,7 +2019,7 @@ async fn switch_account(email: String, auto_restart: Option<bool>, reset_machine
 
     if seamless_enabled {
         log_info!("✨ [DEBUG] 使用无感换号模式切换账户");
-        
+
         // 获取账户列表找到目标账户的token
         let accounts = match AccountManager::load_accounts() {
             Ok(accounts) => accounts,
@@ -1744,18 +2046,25 @@ async fn switch_account(email: String, auto_restart: Option<bool>, reset_machine
         // 先调用传统切换方式（auto_restart强制为false，不重启Cursor）
         log_info!("🔄 [DEBUG] 无感换号模式：先执行传统切换（不重启）");
         let switch_result = AccountManager::switch_account(email.clone(), false);
-        
+
         if !switch_result.success {
             log_error!("❌ [DEBUG] 传统切换失败: {}", switch_result.message);
             return Ok(switch_result);
         }
-        
+
         log_info!("✅ [DEBUG] 传统切换成功，继续更新Web配置");
 
         // 更新Web配置文件，触发无感换号 (手动切换模式)
         // 默认重置机器ID以确保兼容性
         let should_reset = reset_machine_id.unwrap_or(true);
-        if let Err(e) = NextWorkWebServer::update_seamless_switch_token(target_account.token.clone(), email.clone(), false, should_reset).await {
+        if let Err(e) = NextWorkWebServer::update_seamless_switch_token(
+            target_account.token.clone(),
+            email.clone(),
+            false,
+            should_reset,
+        )
+        .await
+        {
             log_error!("❌ [DEBUG] 更新无感换号配置失败: {}", e);
             return Ok(SwitchAccountResult {
                 success: false,
@@ -1765,7 +2074,7 @@ async fn switch_account(email: String, auto_restart: Option<bool>, reset_machine
         }
 
         log_info!("✅ [DEBUG] 无感换号配置已更新，Cursor将自动切换到新账户");
-        
+
         Ok(SwitchAccountResult {
             success: true,
             message: format!("无感换号已触发，切换到账户: {}", email),
@@ -1779,7 +2088,10 @@ async fn switch_account(email: String, auto_restart: Option<bool>, reset_machine
         })
     } else {
         log_info!("🔄 [DEBUG] 使用传统切换模式");
-        Ok(AccountManager::switch_account(email, auto_restart.unwrap_or(true)))
+        Ok(AccountManager::switch_account(
+            email,
+            auto_restart.unwrap_or(true),
+        ))
     }
 }
 
@@ -1857,7 +2169,11 @@ async fn update_account_custom_tags(
             }))
         }
         Err(e) => {
-            log_error!("❌ [DEBUG] Failed to update custom tags for {}: {}", email, e);
+            log_error!(
+                "❌ [DEBUG] Failed to update custom tags for {}: {}",
+                email,
+                e
+            );
             Ok(serde_json::json!({
                 "success": false,
                 "message": format!("Failed to update custom tags: {}", e)
@@ -2029,7 +2345,7 @@ async fn open_cancel_subscription_page(
                     _ => {}
                 }
             });
-            
+
             log_info!("✅ Successfully opened WebView window");
             Ok(serde_json::json!({
                 "success": true,
@@ -2088,7 +2404,7 @@ async fn get_bind_card_url_internal(
     allow_automatic_payment: Option<bool>,
     allow_trial: Option<bool>,
 ) -> Result<String, String> {
-    use reqwest::header::{HeaderMap, HeaderValue, COOKIE};
+    use reqwest::header::{COOKIE, HeaderMap, HeaderValue};
 
     log_info!("🔄 Fetching bind card URL from Cursor API...");
 
@@ -2108,7 +2424,7 @@ async fn get_bind_card_url_internal(
     let tier = subscription_tier.as_deref().unwrap_or("pro");
     let allow_trial_val = allow_trial.unwrap_or(true);
     let allow_automatic_payment_val = allow_automatic_payment.unwrap_or(true);
-    
+
     let body = serde_json::json!({
         "tier": tier,
         "allowTrial": allow_trial_val,
@@ -2158,7 +2474,10 @@ async fn get_bind_card_url_internal(
     // 检查是否返回的是 dashboard 页面（说明已经绑卡）
     if url.contains("cursor.com/dashboard") {
         log_error!("❌ 返回的是 dashboard 页面，该账户可能已经绑卡");
-        return Err("该账户可能已经绑定过银行卡，无法再次绑卡。如需更换银行卡，请先取消订阅后再试。".to_string());
+        return Err(
+            "该账户可能已经绑定过银行卡，无法再次绑卡。如需更换银行卡，请先取消订阅后再试。"
+                .to_string(),
+        );
     }
 
     // 检查是否是 Stripe checkout URL
@@ -2183,7 +2502,8 @@ async fn get_bind_card_url_for_python(
         subscription_tier,
         allow_automatic_payment,
         allow_trial,
-    ).await
+    )
+    .await
 }
 
 // 纯函数：确认宽限期免责声明
@@ -2192,14 +2512,14 @@ async fn acknowledge_grace_period_internal(
 ) -> Result<String, String> {
     use reqwest::header::{HeaderMap, HeaderValue};
 
-    log_info!("🔄 Acknowledging grace period disclaimer...{}",workos_cursor_session_token);
+    log_info!(
+        "🔄 Acknowledging grace period disclaimer...{}",
+        workos_cursor_session_token
+    );
 
     // 构建请求头
     let mut headers = HeaderMap::new();
-    headers.insert(
-        "Origin",
-        HeaderValue::from_static("https://cursor.com"),
-    );
+    headers.insert("Origin", HeaderValue::from_static("https://cursor.com"));
     // 使用传入的 WorkosCursorSessionToken
     let cookie_value = format!("WorkosCursorSessionToken={}", workos_cursor_session_token);
     log_info!(
@@ -2216,10 +2536,10 @@ async fn acknowledge_grace_period_internal(
     let client = reqwest::Client::new();
 
     // 发送 POST 请求
-    log_info!("📤 Sending POST request to https://cursor.com/api/dashboard/web-acknowledge-grace-period-disclaimer");
-    let body = serde_json::json!({
-      
-    });
+    log_info!(
+        "📤 Sending POST request to https://cursor.com/api/dashboard/web-acknowledge-grace-period-disclaimer"
+    );
+    let body = serde_json::json!({});
     match client
         .post("https://cursor.com/api/dashboard/web-acknowledge-grace-period-disclaimer")
         .headers(headers)
@@ -2272,13 +2592,11 @@ async fn acknowledge_grace_period(
     workos_cursor_session_token: String,
 ) -> Result<serde_json::Value, String> {
     match acknowledge_grace_period_internal(workos_cursor_session_token).await {
-        Ok(response) => {
-            Ok(serde_json::json!({
-                "success": true,
-                "message": "Grace period disclaimer acknowledged successfully",
-                "response": response
-            }))
-        }
+        Ok(response) => Ok(serde_json::json!({
+            "success": true,
+            "message": "Grace period disclaimer acknowledged successfully",
+            "response": response
+        })),
         Err(error) => {
             log_error!("❌ Failed to acknowledge grace period: {}", error);
             Err(error)
@@ -2294,7 +2612,14 @@ async fn get_bind_card_url(
     allow_automatic_payment: Option<bool>,
     allow_trial: Option<bool>,
 ) -> Result<serde_json::Value, String> {
-    match get_bind_card_url_internal(workos_cursor_session_token, subscription_tier, allow_automatic_payment, allow_trial).await {
+    match get_bind_card_url_internal(
+        workos_cursor_session_token,
+        subscription_tier,
+        allow_automatic_payment,
+        allow_trial,
+    )
+    .await
+    {
         Ok(url) => {
             // 复制到剪贴板
             #[cfg(target_os = "macos")]
@@ -2311,7 +2636,7 @@ async fn get_bind_card_url(
                         child.wait()
                     });
             }
-            
+
             #[cfg(target_os = "windows")]
             {
                 use std::process::Command;
@@ -2319,7 +2644,7 @@ async fn get_bind_card_url(
                     .args(&["/C", &format!("echo {} | clip", url)])
                     .output();
             }
-            
+
             #[cfg(target_os = "linux")]
             {
                 use std::process::Command;
@@ -2335,7 +2660,7 @@ async fn get_bind_card_url(
                         child.wait()
                     });
             }
-            
+
             Ok(serde_json::json!({
                 "success": true,
                 "url": url,
@@ -2360,7 +2685,14 @@ async fn open_manual_bind_card_page(
     log_info!("🔄 Opening manual bind card page with WorkOS token...");
 
     // 获取绑卡链接
-    let url = match get_bind_card_url_internal(workos_cursor_session_token, subscription_tier, allow_automatic_payment, allow_trial).await {
+    let url = match get_bind_card_url_internal(
+        workos_cursor_session_token,
+        subscription_tier,
+        allow_automatic_payment,
+        allow_trial,
+    )
+    .await
+    {
         Ok(url) => url,
         Err(e) => {
             log_error!("❌ Failed to get bind card URL: {}", e);
@@ -2821,7 +3153,7 @@ async fn refresh_eligible_accounts_cache() -> Result<serde_json::Value, String> 
         Err(e) => Ok(serde_json::json!({
             "success": false,
             "message": format!("缓存刷新失败: {}", e)
-        }))
+        })),
     }
 }
 
@@ -3048,9 +3380,9 @@ async fn batch_register_with_email_parallel(
     first_names: Vec<String>,
     last_names: Vec<String>,
     email_type: Option<String>,
-    _outlook_mode: Option<String>, // 保留用于未来扩展
+    _outlook_mode: Option<String>,  // 保留用于未来扩展
     tempmail_email: Option<String>, // Tempmail邮箱地址
-    tempmail_pin: Option<String>, // Tempmail PIN码
+    tempmail_pin: Option<String>,   // Tempmail PIN码
     self_hosted_mail_url: Option<String>,
     self_hosted_mail_headers_json: Option<String>,
     self_hosted_mail_response_path: Option<String>,
@@ -3062,12 +3394,16 @@ async fn batch_register_with_email_parallel(
     enable_bank_card_binding: Option<bool>,
     skip_phone_verification: Option<bool>,
     selected_card_indices: Option<Vec<u32>>, // 选中的银行卡索引列表
-    config: Option<serde_json::Value>, // 新增：配置JSON，包含订阅配置等
-    max_concurrent: Option<usize>, // 最大并发数，默认为3
+    config: Option<serde_json::Value>,       // 新增：配置JSON，包含订阅配置等
+    max_concurrent: Option<usize>,           // 最大并发数，默认为3
 ) -> Result<serde_json::Value, String> {
     let email_type_str = email_type.as_deref().unwrap_or("custom");
-    log_info!("🔄 批量注册 {} 个 Cursor 账户（并行模式，邮箱类型：{}）...", emails.len(), email_type_str);
-    
+    log_info!(
+        "🔄 批量注册 {} 个 Cursor 账户（并行模式，邮箱类型：{}）...",
+        emails.len(),
+        email_type_str
+    );
+
     if emails.len() != first_names.len() || emails.len() != last_names.len() {
         return Err("邮箱、姓名数量不一致".to_string());
     }
@@ -3076,13 +3412,14 @@ async fn batch_register_with_email_parallel(
     let bank_card_config = read_bank_card_config().await?;
     let bank_card_data: serde_json::Value = serde_json::from_str(&bank_card_config)
         .map_err(|e| format!("解析银行卡配置失败: {}", e))?;
-    
-    let all_cards = if let Some(cards_array) = bank_card_data.get("cards").and_then(|v| v.as_array()) {
-        cards_array.clone()
-    } else {
-        // 如果是旧格式（单张卡），转换为数组
-        vec![bank_card_data]
-    };
+
+    let all_cards =
+        if let Some(cards_array) = bank_card_data.get("cards").and_then(|v| v.as_array()) {
+            cards_array.clone()
+        } else {
+            // 如果是旧格式（单张卡），转换为数组
+            vec![bank_card_data]
+        };
 
     // 如果提供了选中的银行卡索引，则只使用选中的卡片
     let cards = if let Some(indices) = &selected_card_indices {
@@ -3091,7 +3428,11 @@ async fn batch_register_with_email_parallel(
             if (index as usize) < all_cards.len() {
                 selected_cards.push(all_cards[index as usize].clone());
             } else {
-                return Err(format!("银行卡索引 {} 超出范围（总共 {} 张卡）", index, all_cards.len()));
+                return Err(format!(
+                    "银行卡索引 {} 超出范围（总共 {} 张卡）",
+                    index,
+                    all_cards.len()
+                ));
             }
         }
         selected_cards
@@ -3115,14 +3456,17 @@ async fn batch_register_with_email_parallel(
 
     // 获取最大并发数，默认为3
     let max_concurrent_tasks = max_concurrent.unwrap_or(3);
-    
+
     // 创建信号量，限制同时运行的任务数量（避免资源竞争和窗口数量限制）
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(max_concurrent_tasks));
-    log_info!("🚦 使用信号量控制并发，最多同时运行 {} 个注册任务", max_concurrent_tasks);
+    log_info!(
+        "🚦 使用信号量控制并发，最多同时运行 {} 个注册任务",
+        max_concurrent_tasks
+    );
 
     // 创建所有注册任务
     let mut tasks = Vec::new();
-    
+
     for i in 0..total_count {
         let app_clone = app.clone();
         let email = emails[i].clone();
@@ -3142,7 +3486,7 @@ async fn batch_register_with_email_parallel(
         let self_hosted_clear_headers_clone = self_hosted_mail_clear_headers_json.clone();
         let self_hosted_clear_method_clone = self_hosted_mail_clear_method.clone();
         let config_clone = config.clone();
-        
+
         // 计算当前任务应该使用的卡片索引
         let card_index_for_task = if enable_bank_card_binding.unwrap_or(true) && i < cards.len() {
             // 如果提供了选中的银行卡索引，使用对应的索引
@@ -3160,26 +3504,43 @@ async fn batch_register_with_email_parallel(
         } else {
             None
         };
-        
-        let email_display = if email.is_empty() { "自动生成".to_string() } else { email.clone() };
-        log_info!("🎯 [任务 {}/{}] 准备注册: {}", i + 1, total_count, email_display);
-        
+
+        let email_display = if email.is_empty() {
+            "自动生成".to_string()
+        } else {
+            email.clone()
+        };
+        log_info!(
+            "🎯 [任务 {}/{}] 准备注册: {}",
+            i + 1,
+            total_count,
+            email_display
+        );
+
         let semaphore_clone = semaphore.clone();
-        
+
         // 创建异步任务
         let task = tokio::spawn(async move {
             let task_index = i;
-            
+
             // 获取信号量许可，如果已经有2个任务在运行，这里会等待
-            log_info!("🚦 [任务 {}/{}] 等待获取执行许可...", task_index + 1, total_count);
+            log_info!(
+                "🚦 [任务 {}/{}] 等待获取执行许可...",
+                task_index + 1,
+                total_count
+            );
             let _permit = semaphore_clone.acquire().await.unwrap();
-            log_info!("✅ [任务 {}/{}] 获得执行许可，开始执行注册", task_index + 1, total_count);
-            
+            log_info!(
+                "✅ [任务 {}/{}] 获得执行许可，开始执行注册",
+                task_index + 1,
+                total_count
+            );
+
             // 根据邮箱类型调用不同的注册函数
             let result = match email_type_str.as_str() {
                 "cloudflare_temp" => {
                     log_info!("📧 [任务 {}] 使用 Cloudflare 临时邮箱注册", task_index + 1);
-                    
+
                     register_with_cloudflare_temp_email(
                         app_clone.clone(),
                         first_name.clone(),
@@ -3193,8 +3554,12 @@ async fn batch_register_with_email_parallel(
                     .await
                 }
                 "tempmail" => {
-                    log_info!("📧 [任务 {}] 使用 Tempmail 邮箱注册: {}", task_index + 1, email);
-                    
+                    log_info!(
+                        "📧 [任务 {}] 使用 Tempmail 邮箱注册: {}",
+                        task_index + 1,
+                        email
+                    );
+
                     register_with_tempmail(
                         app_clone.clone(),
                         email.clone(),
@@ -3211,8 +3576,12 @@ async fn batch_register_with_email_parallel(
                     .await
                 }
                 "outlook" => {
-                    log_info!("📧 [任务 {}] 使用 Outlook 邮箱注册: {}", task_index + 1, email);
-                    
+                    log_info!(
+                        "📧 [任务 {}] 使用 Outlook 邮箱注册: {}",
+                        task_index + 1,
+                        email
+                    );
+
                     register_with_outlook(
                         app_clone.clone(),
                         email.clone(),
@@ -3265,7 +3634,7 @@ async fn batch_register_with_email_parallel(
                 _ => {
                     // custom 或其他：使用指定邮箱
                     log_info!("📧 [任务 {}] 使用自定义邮箱注册: {}", task_index + 1, email);
-                    
+
                     register_with_email(
                         app_clone.clone(),
                         email.clone(),
@@ -3280,20 +3649,18 @@ async fn batch_register_with_email_parallel(
                     .await
                 }
             };
-            
+
             // 获取实际使用的邮箱（从结果中提取）
             let actual_email = match &result {
-                Ok(result_data) => {
-                    result_data
-                        .get("accountInfo")
-                        .and_then(|info| info.get("email"))
-                        .and_then(|e| e.as_str())
-                        .unwrap_or(&email)
-                        .to_string()
-                }
+                Ok(result_data) => result_data
+                    .get("accountInfo")
+                    .and_then(|info| info.get("email"))
+                    .and_then(|e| e.as_str())
+                    .unwrap_or(&email)
+                    .to_string(),
                 Err(_) => email.clone(),
             };
-            
+
             let task_result = match result {
                 Ok(result) => {
                     log_info!("✅ [任务 {}] 注册成功: {}", task_index + 1, actual_email);
@@ -3305,7 +3672,12 @@ async fn batch_register_with_email_parallel(
                     }))
                 }
                 Err(e) => {
-                    log_error!("❌ [任务 {}] 注册失败: {} - {}", task_index + 1, actual_email, e);
+                    log_error!(
+                        "❌ [任务 {}] 注册失败: {} - {}",
+                        task_index + 1,
+                        actual_email,
+                        e
+                    );
                     Err(serde_json::json!({
                         "index": task_index,
                         "email": actual_email,
@@ -3314,16 +3686,16 @@ async fn batch_register_with_email_parallel(
                     }))
                 }
             };
-            
+
             // _permit 在这里离开作用域，自动释放信号量许可
             drop(_permit);
             log_info!("🔓 [任务 {}/{}] 释放执行许可", task_index + 1, total_count);
-            
+
             task_result
         });
-        
+
         tasks.push(task);
-        
+
         // 添加短暂延迟，避免同时创建太多任务
         if i < total_count - 1 {
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -3335,7 +3707,7 @@ async fn batch_register_with_email_parallel(
     // 等待所有任务完成
     let mut results = Vec::new();
     let mut errors = Vec::new();
-    
+
     for task in tasks {
         match task.await {
             Ok(Ok(result)) => {
@@ -3378,9 +3750,9 @@ async fn batch_register_with_email(
     first_names: Vec<String>,
     last_names: Vec<String>,
     email_type: Option<String>,
-    _outlook_mode: Option<String>, // 保留用于未来扩展
+    _outlook_mode: Option<String>,  // 保留用于未来扩展
     tempmail_email: Option<String>, // Tempmail邮箱地址
-    tempmail_pin: Option<String>, // Tempmail PIN码
+    tempmail_pin: Option<String>,   // Tempmail PIN码
     self_hosted_mail_url: Option<String>,
     self_hosted_mail_headers_json: Option<String>,
     self_hosted_mail_response_path: Option<String>,
@@ -3392,11 +3764,15 @@ async fn batch_register_with_email(
     enable_bank_card_binding: Option<bool>,
     skip_phone_verification: Option<bool>,
     selected_card_indices: Option<Vec<u32>>, // 选中的银行卡索引列表
-    config: Option<serde_json::Value>, // 新增：配置JSON，包含订阅配置等
+    config: Option<serde_json::Value>,       // 新增：配置JSON，包含订阅配置等
 ) -> Result<serde_json::Value, String> {
     let email_type_str = email_type.as_deref().unwrap_or("custom");
-    log_info!("🔄 批量注册 {} 个 Cursor 账户（串行模式，邮箱类型：{}）...", emails.len(), email_type_str);
-    
+    log_info!(
+        "🔄 批量注册 {} 个 Cursor 账户（串行模式，邮箱类型：{}）...",
+        emails.len(),
+        email_type_str
+    );
+
     if emails.len() != first_names.len() || emails.len() != last_names.len() {
         return Err("邮箱、姓名数量不一致".to_string());
     }
@@ -3405,13 +3781,14 @@ async fn batch_register_with_email(
     let bank_card_config = read_bank_card_config().await?;
     let bank_card_data: serde_json::Value = serde_json::from_str(&bank_card_config)
         .map_err(|e| format!("解析银行卡配置失败: {}", e))?;
-    
-    let all_cards = if let Some(cards_array) = bank_card_data.get("cards").and_then(|v| v.as_array()) {
-        cards_array.clone()
-    } else {
-        // 如果是旧格式（单张卡），转换为数组
-        vec![bank_card_data]
-    };
+
+    let all_cards =
+        if let Some(cards_array) = bank_card_data.get("cards").and_then(|v| v.as_array()) {
+            cards_array.clone()
+        } else {
+            // 如果是旧格式（单张卡），转换为数组
+            vec![bank_card_data]
+        };
 
     // 如果提供了选中的银行卡索引，则只使用选中的卡片
     let cards = if let Some(indices) = &selected_card_indices {
@@ -3420,7 +3797,11 @@ async fn batch_register_with_email(
             if (index as usize) < all_cards.len() {
                 selected_cards.push(all_cards[index as usize].clone());
             } else {
-                return Err(format!("银行卡索引 {} 超出范围（总共 {} 张卡）", index, all_cards.len()));
+                return Err(format!(
+                    "银行卡索引 {} 超出范围（总共 {} 张卡）",
+                    index,
+                    all_cards.len()
+                ));
             }
         }
         selected_cards
@@ -3444,15 +3825,24 @@ async fn batch_register_with_email(
     // 串行执行注册，一个接一个
     let mut results = Vec::new();
     let mut errors = Vec::new();
-    
+
     for i in 0..emails.len() {
         let email = emails[i].clone();
         let first_name = first_names[i].clone();
         let last_name = last_names[i].clone();
-        
-        let email_display = if email.is_empty() { "自动生成" } else { &email };
-        log_info!("🎯 [任务 {}/{}] 开始注册: {}", i + 1, emails.len(), email_display);
-        
+
+        let email_display = if email.is_empty() {
+            "自动生成"
+        } else {
+            &email
+        };
+        log_info!(
+            "🎯 [任务 {}/{}] 开始注册: {}",
+            i + 1,
+            emails.len(),
+            email_display
+        );
+
         // 计算当前任务应该使用的卡片索引
         let card_index_for_task = if enable_bank_card_binding.unwrap_or(true) && i < cards.len() {
             // 如果提供了选中的银行卡索引，使用对应的索引
@@ -3470,12 +3860,16 @@ async fn batch_register_with_email(
         } else {
             None
         };
-        
+
         // 根据邮箱类型调用不同的注册函数
         let result = match email_type_str {
             "cloudflare_temp" => {
-                log_info!("📧 [任务 {}/{}] 使用 Cloudflare 临时邮箱注册", i + 1, emails.len());
-                
+                log_info!(
+                    "📧 [任务 {}/{}] 使用 Cloudflare 临时邮箱注册",
+                    i + 1,
+                    emails.len()
+                );
+
                 register_with_cloudflare_temp_email(
                     app.clone(),
                     first_name.clone(),
@@ -3484,13 +3878,18 @@ async fn batch_register_with_email(
                     enable_bank_card_binding,
                     skip_phone_verification,
                     card_index_for_task, // 传递计算出的卡片索引
-                    config.clone(), // 传递config参数
+                    config.clone(),      // 传递config参数
                 )
                 .await
             }
             "tempmail" => {
-                log_info!("📧 [任务 {}/{}] 使用 Tempmail 邮箱注册: {}", i + 1, emails.len(), email);
-                
+                log_info!(
+                    "📧 [任务 {}/{}] 使用 Tempmail 邮箱注册: {}",
+                    i + 1,
+                    emails.len(),
+                    email
+                );
+
                 register_with_tempmail(
                     app.clone(),
                     email.clone(),
@@ -3502,13 +3901,18 @@ async fn batch_register_with_email(
                     enable_bank_card_binding,
                     skip_phone_verification,
                     card_index_for_task, // 传递计算出的卡片索引
-                    config.clone(), // 传递config参数
+                    config.clone(),      // 传递config参数
                 )
                 .await
             }
             "outlook" => {
-                log_info!("📧 [任务 {}/{}] 使用 Outlook 邮箱注册: {}", i + 1, emails.len(), email);
-                
+                log_info!(
+                    "📧 [任务 {}/{}] 使用 Outlook 邮箱注册: {}",
+                    i + 1,
+                    emails.len(),
+                    email
+                );
+
                 register_with_outlook(
                     app.clone(),
                     email.clone(),
@@ -3518,7 +3922,7 @@ async fn batch_register_with_email(
                     enable_bank_card_binding,
                     skip_phone_verification,
                     card_index_for_task, // 传递计算出的卡片索引
-                    config.clone(), // 传递config参数
+                    config.clone(),      // 传递config参数
                 )
                 .await
             }
@@ -3561,8 +3965,13 @@ async fn batch_register_with_email(
             }
             _ => {
                 // custom 或其他：使用指定邮箱
-                log_info!("📧 [任务 {}/{}] 使用自定义邮箱注册: {}", i + 1, emails.len(), email);
-                
+                log_info!(
+                    "📧 [任务 {}/{}] 使用自定义邮箱注册: {}",
+                    i + 1,
+                    emails.len(),
+                    email
+                );
+
                 register_with_email(
                     app.clone(),
                     email.clone(),
@@ -3572,28 +3981,31 @@ async fn batch_register_with_email(
                     enable_bank_card_binding,
                     skip_phone_verification,
                     card_index_for_task, // 传递计算出的卡片索引
-                    config.clone(), // 传递config参数
+                    config.clone(),      // 传递config参数
                 )
                 .await
             }
         };
-        
+
         // 获取实际使用的邮箱（从结果中提取）
         let actual_email = match &result {
-            Ok(result_data) => {
-                result_data
-                    .get("accountInfo")
-                    .and_then(|info| info.get("email"))
-                    .and_then(|e| e.as_str())
-                    .unwrap_or(&email)
-                    .to_string()
-            }
+            Ok(result_data) => result_data
+                .get("accountInfo")
+                .and_then(|info| info.get("email"))
+                .and_then(|e| e.as_str())
+                .unwrap_or(&email)
+                .to_string(),
             Err(_) => email.clone(),
         };
-        
+
         match result {
             Ok(result) => {
-                log_info!("✅ [任务 {}/{}] 注册成功: {}", i + 1, emails.len(), actual_email);
+                log_info!(
+                    "✅ [任务 {}/{}] 注册成功: {}",
+                    i + 1,
+                    emails.len(),
+                    actual_email
+                );
                 results.push(serde_json::json!({
                     "index": i,
                     "email": actual_email,
@@ -3602,7 +4014,13 @@ async fn batch_register_with_email(
                 }));
             }
             Err(e) => {
-                log_error!("❌ [任务 {}/{}] 注册失败: {} - {}", i + 1, emails.len(), actual_email, e);
+                log_error!(
+                    "❌ [任务 {}/{}] 注册失败: {} - {}",
+                    i + 1,
+                    emails.len(),
+                    actual_email,
+                    e
+                );
                 errors.push(serde_json::json!({
                     "index": i,
                     "email": actual_email,
@@ -3611,7 +4029,7 @@ async fn batch_register_with_email(
                 }));
             }
         }
-        
+
         // 添加短暂延迟，让系统有时间清理资源
         if i < emails.len() - 1 {
             log_info!("⏱️  等待 2 秒后开始下一个注册任务...");
@@ -3646,7 +4064,7 @@ async fn register_with_email(
     use_incognito: Option<bool>,
     enable_bank_card_binding: Option<bool>,
     skip_phone_verification: Option<bool>,
-    selected_card_index: Option<u32>, // 选中的银行卡索引
+    selected_card_index: Option<u32>,  // 选中的银行卡索引
     config: Option<serde_json::Value>, // 新增：配置JSON，包含订阅配置等
 ) -> Result<serde_json::Value, String> {
     log_info!("╔══════════════════════════════════════════════════════════╗");
@@ -3661,38 +4079,47 @@ async fn register_with_email(
 
     // 获取自定义浏览器路径
     let custom_browser_path = {
-        let restorer = MachineIdRestorer::new().map_err(|e| format!("Failed to initialize restorer: {}", e))?;
+        let restorer = MachineIdRestorer::new()
+            .map_err(|e| format!("Failed to initialize restorer: {}", e))?;
         restorer.get_custom_browser_path()
     };
 
     // 如果启用了银行卡绑定，验证配置存在（不再需要备份和临时修改配置）
     if enable_bank_card_binding.unwrap_or(true) {
         log_info!("💳 验证银行卡配置...");
-        
+
         // 验证银行卡配置存在
         let bank_card_config = read_bank_card_config().await?;
         let bank_card_data: serde_json::Value = serde_json::from_str(&bank_card_config)
             .map_err(|e| format!("解析银行卡配置失败: {}", e))?;
-        
+
         // 获取所有卡片
-        let all_cards = if let Some(cards_array) = bank_card_data.get("cards").and_then(|v| v.as_array()) {
-            cards_array.clone()
-        } else {
-            // 旧格式：整个配置就是一张卡
-            vec![bank_card_data.clone()]
-        };
-        
+        let all_cards =
+            if let Some(cards_array) = bank_card_data.get("cards").and_then(|v| v.as_array()) {
+                cards_array.clone()
+            } else {
+                // 旧格式：整个配置就是一张卡
+                vec![bank_card_data.clone()]
+            };
+
         if all_cards.is_empty() {
             return Err("银行卡配置为空，请先配置至少一张银行卡".to_string());
         }
-        
+
         // 验证索引有效性
         let card_index = selected_card_index.unwrap_or(0) as usize;
         if card_index >= all_cards.len() {
-            return Err(format!("银行卡索引 {} 超出范围（总共 {} 张卡）", card_index, all_cards.len()));
+            return Err(format!(
+                "银行卡索引 {} 超出范围（总共 {} 张卡）",
+                card_index,
+                all_cards.len()
+            ));
         }
-        
-        log_info!("✅ 将使用卡片索引 {} 进行注册（通过config传递给Python）", card_index);
+
+        log_info!(
+            "✅ 将使用卡片索引 {} 进行注册（通过config传递给Python）",
+            card_index
+        );
     }
 
     // 获取可执行文件路径
@@ -3739,18 +4166,18 @@ async fn register_with_email(
             "useApiForBindCard": frontend_config.get("useApiForBindCard").and_then(|v| v.as_u64()).unwrap_or(1),
             "cardIndex": selected_card_index.unwrap_or(0)
         });
-        
+
         // 添加代理配置
         if let Some(proxy_config) = frontend_config.get("proxy") {
             config_obj["proxy"] = proxy_config.clone();
         }
-        
+
         // 添加自定义浏览器路径
         if let Some(browser_path) = &custom_browser_path {
             config_obj["custom_browser_path"] = serde_json::Value::String(browser_path.clone());
             log_info!("🌐 添加自定义浏览器路径到配置: {}", browser_path);
         }
-        
+
         config_obj
     } else {
         // 使用默认配置
@@ -3762,18 +4189,17 @@ async fn register_with_email(
             "useApiForBindCard": 1,
             "cardIndex": selected_card_index.unwrap_or(0)
         });
-        
+
         // 添加自定义浏览器路径
         if let Some(browser_path) = &custom_browser_path {
             config_obj["custom_browser_path"] = serde_json::Value::String(browser_path.clone());
             log_info!("🌐 添加自定义浏览器路径到配置: {}", browser_path);
         }
-        
+
         config_obj
     };
-    
-    let config_json_str = serde_json::to_string(&final_config)
-        .unwrap_or_else(|_| "{}".to_string());
+
+    let config_json_str = serde_json::to_string(&final_config).unwrap_or_else(|_| "{}".to_string());
 
     // 生成任务ID用于隔离验证码文件（支持并行注册）
     let task_id = generate_task_id(&email);
@@ -3879,7 +4305,7 @@ async fn register_with_email(
                         }),
                     );
                 }
-                
+
                 // 检查验证码是否超时，需要手动输入
                 if line.contains("verification_timeout") || line.contains("manual_input_required") {
                     log_info!("⏰ 验证码获取超时，需要用户手动输入");
@@ -4072,7 +4498,7 @@ async fn register_with_cloudflare_temp_email(
     use_incognito: Option<bool>,
     enable_bank_card_binding: Option<bool>,
     skip_phone_verification: Option<bool>,
-    selected_card_index: Option<u32>, // 选中的银行卡索引
+    selected_card_index: Option<u32>,  // 选中的银行卡索引
     config: Option<serde_json::Value>, // 新增：配置JSON，包含订阅配置等
 ) -> Result<serde_json::Value, String> {
     log_info!("🔄 使用Cloudflare临时邮箱注册 Cursor 账户...");
@@ -4085,38 +4511,47 @@ async fn register_with_cloudflare_temp_email(
 
     // 获取自定义浏览器路径
     let custom_browser_path = {
-        let restorer = MachineIdRestorer::new().map_err(|e| format!("Failed to initialize restorer: {}", e))?;
+        let restorer = MachineIdRestorer::new()
+            .map_err(|e| format!("Failed to initialize restorer: {}", e))?;
         restorer.get_custom_browser_path()
     };
 
     // 如果启用了银行卡绑定，验证配置存在（不再需要备份和临时修改配置）
     if enable_bank_card_binding.unwrap_or(true) {
         log_info!("💳 验证银行卡配置...");
-        
+
         // 验证银行卡配置存在
         let bank_card_config = read_bank_card_config().await?;
         let bank_card_data: serde_json::Value = serde_json::from_str(&bank_card_config)
             .map_err(|e| format!("解析银行卡配置失败: {}", e))?;
-        
+
         // 获取所有卡片
-        let all_cards = if let Some(cards_array) = bank_card_data.get("cards").and_then(|v| v.as_array()) {
-            cards_array.clone()
-        } else {
-            // 旧格式：整个配置就是一张卡
-            vec![bank_card_data.clone()]
-        };
-        
+        let all_cards =
+            if let Some(cards_array) = bank_card_data.get("cards").and_then(|v| v.as_array()) {
+                cards_array.clone()
+            } else {
+                // 旧格式：整个配置就是一张卡
+                vec![bank_card_data.clone()]
+            };
+
         if all_cards.is_empty() {
             return Err("银行卡配置为空，请先配置至少一张银行卡".to_string());
         }
-        
+
         // 验证索引有效性
         let card_index = selected_card_index.unwrap_or(0) as usize;
         if card_index >= all_cards.len() {
-            return Err(format!("银行卡索引 {} 超出范围（总共 {} 张卡）", card_index, all_cards.len()));
+            return Err(format!(
+                "银行卡索引 {} 超出范围（总共 {} 张卡）",
+                card_index,
+                all_cards.len()
+            ));
         }
-        
-        log_info!("✅ 将使用卡片索引 {} 进行注册（通过config传递给Python）", card_index);
+
+        log_info!(
+            "✅ 将使用卡片索引 {} 进行注册（通过config传递给Python）",
+            card_index
+        );
     }
 
     // 1. 创建临时邮箱
@@ -4167,18 +4602,18 @@ async fn register_with_cloudflare_temp_email(
             "useApiForBindCard": frontend_config.get("useApiForBindCard").and_then(|v| v.as_u64()).unwrap_or(1),
             "cardIndex": selected_card_index.unwrap_or(0)
         });
-        
+
         // 添加代理配置
         if let Some(proxy_config) = frontend_config.get("proxy") {
             config_obj["proxy"] = proxy_config.clone();
         }
-        
+
         // 添加自定义浏览器路径
         if let Some(browser_path) = &custom_browser_path {
             config_obj["custom_browser_path"] = serde_json::Value::String(browser_path.clone());
             log_info!("🌐 添加自定义浏览器路径到配置: {}", browser_path);
         }
-        
+
         config_obj
     } else {
         // 使用默认配置
@@ -4190,18 +4625,17 @@ async fn register_with_cloudflare_temp_email(
             "useApiForBindCard": 1,
             "cardIndex": selected_card_index.unwrap_or(0)
         });
-        
+
         // 添加自定义浏览器路径
         if let Some(browser_path) = &custom_browser_path {
             config_obj["custom_browser_path"] = serde_json::Value::String(browser_path.clone());
             log_info!("🌐 添加自定义浏览器路径到配置: {}", browser_path);
         }
-        
+
         config_obj
     };
-    
-    let config_json_str = serde_json::to_string(&final_config)
-        .unwrap_or_else(|_| "{}".to_string());
+
+    let config_json_str = serde_json::to_string(&final_config).unwrap_or_else(|_| "{}".to_string());
 
     // 生成任务ID用于隔离验证码文件（支持并行注册）
     let task_id = generate_task_id(&email);
@@ -4330,7 +4764,10 @@ async fn register_with_cloudflare_temp_email(
                                                 log_error!("❌ 发送验证码事件失败: {}", e);
                                             }
 
-                                            log_info!("✅ 验证码已自动填入临时文件: {}", code_file_task);
+                                            log_info!(
+                                                "✅ 验证码已自动填入临时文件: {}",
+                                                code_file_task
+                                            );
                                             return;
                                         }
                                         Err(e) => {
@@ -4355,8 +4792,10 @@ async fn register_with_cloudflare_temp_email(
                         });
                     }
 
-                         // 检查验证码是否超时，需要手动输入
-                    if line_content.contains("verification_timeout") || line_content.contains("manual_input_required") {
+                    // 检查验证码是否超时，需要手动输入
+                    if line_content.contains("verification_timeout")
+                        || line_content.contains("manual_input_required")
+                    {
                         log_info!("⏰ 验证码获取超时，需要用户手动输入");
                         let _ = app_clone.emit(
                             "verification-code-timeout",
@@ -4368,7 +4807,7 @@ async fn register_with_cloudflare_temp_email(
                         );
                     }
 
-                    // 发送实时输出到前端       
+                    // 发送实时输出到前端
                     if let Err(e) = app_clone.emit(
                         "registration-output",
                         serde_json::json!({
@@ -4476,39 +4915,52 @@ async fn register_with_tempmail(
     log_info!("⚠️  如果您看到多个浏览器窗口，请检查是否重复点击了注册按钮！");
     log_info!("📧 注册邮箱: {}", email);
     log_info!("📧 临时邮箱: {}", tempmail_email);
-    log_info!("🔑 PIN码: {}", if tempmail_pin.is_empty() { "无" } else { "已设置" });
+    log_info!(
+        "🔑 PIN码: {}",
+        if tempmail_pin.is_empty() {
+            "无"
+        } else {
+            "已设置"
+        }
+    );
     log_info!("👤 姓名: {} {}", first_name, last_name);
     log_info!("🔍 跳过手机号验证: {:?}", skip_phone_verification);
 
     // 获取自定义浏览器路径
     let custom_browser_path = {
-        let restorer = MachineIdRestorer::new().map_err(|e| format!("Failed to initialize restorer: {}", e))?;
+        let restorer = MachineIdRestorer::new()
+            .map_err(|e| format!("Failed to initialize restorer: {}", e))?;
         restorer.get_custom_browser_path()
     };
 
     // 如果启用了银行卡绑定，验证配置存在
     if enable_bank_card_binding.unwrap_or(true) {
         log_info!("💳 验证银行卡配置...");
-        
+
         let bank_card_config = read_bank_card_config().await?;
         let bank_card_data: serde_json::Value = serde_json::from_str(&bank_card_config)
             .map_err(|e| format!("解析银行卡配置失败: {}", e))?;
-        
-        let all_cards = if let Some(cards_array) = bank_card_data.get("cards").and_then(|v| v.as_array()) {
-            cards_array.clone()
-        } else {
-            vec![bank_card_data.clone()]
-        };
-        
+
+        let all_cards =
+            if let Some(cards_array) = bank_card_data.get("cards").and_then(|v| v.as_array()) {
+                cards_array.clone()
+            } else {
+                vec![bank_card_data.clone()]
+            };
+
         if all_cards.is_empty() {
             return Err("银行卡配置为空，请先配置至少一张银行卡".to_string());
         }
-        
+
         let card_index = selected_card_index.unwrap_or(0) as usize;
         if card_index >= all_cards.len() {
-            return Err(format!("银行卡索引 {} 超出范围（总共 {} 张卡）", card_index, all_cards.len()));
+            return Err(format!(
+                "银行卡索引 {} 超出范围（总共 {} 张卡）",
+                card_index,
+                all_cards.len()
+            ));
         }
-        
+
         log_info!("✅ 将使用卡片索引 {} 进行注册", card_index);
     }
 
@@ -4519,9 +4971,21 @@ async fn register_with_tempmail(
     }
 
     // 设置参数
-    let incognito_flag = if use_incognito.unwrap_or(true) { "true" } else { "false" };
-    let bank_card_flag = if enable_bank_card_binding.unwrap_or(true) { "true" } else { "false" };
-    let skip_phone_flag = if skip_phone_verification.unwrap_or(false) { "1" } else { "0" };
+    let incognito_flag = if use_incognito.unwrap_or(true) {
+        "true"
+    } else {
+        "false"
+    };
+    let bank_card_flag = if enable_bank_card_binding.unwrap_or(true) {
+        "true"
+    } else {
+        "false"
+    };
+    let skip_phone_flag = if skip_phone_verification.unwrap_or(false) {
+        "1"
+    } else {
+        "0"
+    };
 
     let app_dir = get_app_dir()?;
     let app_dir_str = app_dir.to_string_lossy().to_string();
@@ -4539,16 +5003,16 @@ async fn register_with_tempmail(
             "tempmail_email": tempmail_email.clone(),
             "tempmail_pin": tempmail_pin.clone()
         });
-        
+
         if let Some(proxy_config) = frontend_config.get("proxy") {
             config_obj["proxy"] = proxy_config.clone();
         }
-        
+
         if let Some(browser_path) = &custom_browser_path {
             config_obj["custom_browser_path"] = serde_json::Value::String(browser_path.clone());
             log_info!("🌐 添加自定义浏览器路径到配置: {}", browser_path);
         }
-        
+
         config_obj
     } else {
         let mut config_obj = serde_json::json!({
@@ -4561,15 +5025,15 @@ async fn register_with_tempmail(
             "tempmail_email": tempmail_email.clone(),
             "tempmail_pin": tempmail_pin.clone()
         });
-        
+
         if let Some(browser_path) = &custom_browser_path {
             config_obj["custom_browser_path"] = serde_json::Value::String(browser_path.clone());
             log_info!("🌐 添加自定义浏览器路径到配置: {}", browser_path);
         }
-        
+
         config_obj
     };
-    
+
     let config_json_str = serde_json::to_string(&final_config).unwrap_or_else(|_| "{}".to_string());
 
     // 生成任务ID用于隔离验证码文件（支持并行注册）
@@ -4580,7 +5044,7 @@ async fn register_with_tempmail(
     // 停止信号文件路径，通过环境变量传递给 Python
     let stop_file = temp_dir.join(format!("cursor_registration_stop_{}.txt", task_id));
     let stop_file_path = stop_file.to_string_lossy().to_string();
-    
+
     log_info!("🆔 任务ID: {}", task_id);
     log_info!("📄 验证码文件: {}", code_file_path);
     log_info!("🛑 停止信号文件: {}", stop_file_path);
@@ -4627,7 +5091,10 @@ async fn register_with_tempmail(
     let app_for_verification = app.clone();
     let code_file_for_thread = code_file_path.clone();
 
-    use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
     let verification_needed = Arc::new(AtomicBool::new(false));
     let verification_needed_clone = verification_needed.clone();
 
@@ -4651,7 +5118,9 @@ async fn register_with_tempmail(
                     log_info!("📝 Python输出: {}", line_content);
 
                     // 检查是否需要验证码
-                    if line_content.contains("等待验证码") || line_content.contains("request_verification_code") {
+                    if line_content.contains("等待验证码")
+                        || line_content.contains("request_verification_code")
+                    {
                         log_debug!("🔍 检测到验证码请求，开始从tempmail获取验证码...");
                         verification_needed_clone.store(true, Ordering::Relaxed);
 
@@ -4662,7 +5131,7 @@ async fn register_with_tempmail(
                         let app_task = app_verification_clone.clone();
                         let code_file_task = code_file_for_thread.clone();
                         let task_id_clone = task_id_for_thread.clone();
-                        
+
                         std::thread::spawn(move || {
                             let rt = tokio::runtime::Runtime::new().unwrap();
                             rt.block_on(async {
@@ -4672,7 +5141,9 @@ async fn register_with_tempmail(
                                     &tempmail_email_task,
                                     &tempmail_pin_task,
                                     &register_email_task,
-                                ).await {
+                                )
+                                .await
+                                {
                                     Ok(code) => {
                                         log_info!("🎯 自动从tempmail获取到验证码: {}", code);
 
@@ -4683,7 +5154,9 @@ async fn register_with_tempmail(
                                         }
 
                                         // 发送事件通知前端
-                                        if let Err(e) = app_task.emit("verification-code-auto-filled", &code) {
+                                        if let Err(e) =
+                                            app_task.emit("verification-code-auto-filled", &code)
+                                        {
                                             log_error!("❌ 发送验证码事件失败: {}", e);
                                         }
 
@@ -4692,11 +5165,14 @@ async fn register_with_tempmail(
                                     Err(e) => {
                                         log_error!("❌ 从tempmail获取验证码失败: {}", e);
                                         log_info!("⏰ 验证码获取超时，需要用户手动输入");
-                                        let _ = app_task.emit("verification-code-timeout", serde_json::json!({
-                                            "message": "自动获取验证码超时，请手动输入验证码",
-                                            "task_id": task_id_clone,
-                                            "email": register_email_task
-                                        }));
+                                        let _ = app_task.emit(
+                                            "verification-code-timeout",
+                                            serde_json::json!({
+                                                "message": "自动获取验证码超时，请手动输入验证码",
+                                                "task_id": task_id_clone,
+                                                "email": register_email_task
+                                            }),
+                                        );
                                     }
                                 }
                             });
@@ -4723,7 +5199,9 @@ async fn register_with_tempmail(
     });
 
     // 等待Python脚本完成
-    let output = child.wait_with_output().map_err(|e| format!("等待Python脚本完成失败: {}", e))?;
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("等待Python脚本完成失败: {}", e))?;
 
     // 等待输出任务完成
     if let Err(e) = output_task.join() {
@@ -4740,7 +5218,10 @@ async fn register_with_tempmail(
         if !stderr.is_empty() {
             log_error!("📤 stderr: {}", stderr);
         }
-        return Err(format!("Python脚本执行失败，退出码: {:?}", output.status.code()));
+        return Err(format!(
+            "Python脚本执行失败，退出码: {:?}",
+            output.status.code()
+        ));
     }
 
     // 进程成功退出，尝试解析JSON输出（如果有的话）
@@ -4769,7 +5250,10 @@ async fn register_with_tempmail(
             }
             Err(e) => {
                 // JSON解析失败，但进程成功退出，仍然认为注册成功
-                log_warn!("⚠️ 解析Python输出JSON失败: {}，但进程成功退出，认为注册成功", e);
+                log_warn!(
+                    "⚠️ 解析Python输出JSON失败: {}，但进程成功退出，认为注册成功",
+                    e
+                );
                 serde_json::json!({
                     "success": true,
                     "email": email,
@@ -4781,7 +5265,12 @@ async fn register_with_tempmail(
     };
 
     // 如果JSON中有明确的成功标识，使用JSON中的信息
-    if result["success"].as_bool().unwrap_or(false) || result.get("message").and_then(|m| m.as_str()).map_or(false, |s| s.contains("注册成功")) {
+    if result["success"].as_bool().unwrap_or(false)
+        || result
+            .get("message")
+            .and_then(|m| m.as_str())
+            .map_or(false, |s| s.contains("注册成功"))
+    {
         // 保存账户信息
         if let Some(email_str) = result["email"].as_str() {
             match AccountManager::add_account(
@@ -4814,7 +5303,7 @@ async fn register_with_outlook(
     use_incognito: Option<bool>,
     enable_bank_card_binding: Option<bool>,
     skip_phone_verification: Option<bool>,
-    selected_card_index: Option<u32>, // 选中的银行卡索引
+    selected_card_index: Option<u32>,  // 选中的银行卡索引
     config: Option<serde_json::Value>, // 新增：配置JSON，包含订阅配置等
 ) -> Result<serde_json::Value, String> {
     log_info!("🔄 使用Outlook邮箱注册 Cursor 账户...");
@@ -4828,40 +5317,49 @@ async fn register_with_outlook(
 
     // 获取自定义浏览器路径
     let custom_browser_path = {
-        let restorer = MachineIdRestorer::new().map_err(|e| format!("Failed to initialize restorer: {}", e))?;
+        let restorer = MachineIdRestorer::new()
+            .map_err(|e| format!("Failed to initialize restorer: {}", e))?;
         restorer.get_custom_browser_path()
     };
 
     // 如果启用了银行卡绑定，先备份并设置银行卡配置（使用第一张卡）
     if enable_bank_card_binding.unwrap_or(true) {
         log_info!("💳 准备设置银行卡配置...");
-        
+
         // 注意：不再需要备份配置，因为现在通过config传递cardIndex，不会修改配置文件
-        
+
         // 验证银行卡配置存在
         let bank_card_config = read_bank_card_config().await?;
         let bank_card_data: serde_json::Value = serde_json::from_str(&bank_card_config)
             .map_err(|e| format!("解析银行卡配置失败: {}", e))?;
-        
+
         // 获取所有卡片
-        let all_cards = if let Some(cards_array) = bank_card_data.get("cards").and_then(|v| v.as_array()) {
-            cards_array.clone()
-        } else {
-            // 旧格式：整个配置就是一张卡
-            vec![bank_card_data.clone()]
-        };
-        
+        let all_cards =
+            if let Some(cards_array) = bank_card_data.get("cards").and_then(|v| v.as_array()) {
+                cards_array.clone()
+            } else {
+                // 旧格式：整个配置就是一张卡
+                vec![bank_card_data.clone()]
+            };
+
         if all_cards.is_empty() {
             return Err("银行卡配置为空，请先配置至少一张银行卡".to_string());
         }
-        
+
         // 验证索引有效性
         let card_index = selected_card_index.unwrap_or(0) as usize;
         if card_index >= all_cards.len() {
-            return Err(format!("银行卡索引 {} 超出范围（总共 {} 张卡）", card_index, all_cards.len()));
+            return Err(format!(
+                "银行卡索引 {} 超出范围（总共 {} 张卡）",
+                card_index,
+                all_cards.len()
+            ));
         }
-        
-        log_info!("✅ 将使用卡片索引 {} 进行注册（通过config传递给Python）", card_index);
+
+        log_info!(
+            "✅ 将使用卡片索引 {} 进行注册（通过config传递给Python）",
+            card_index
+        );
     }
 
     // 获取可执行文件路径
@@ -4906,18 +5404,18 @@ async fn register_with_outlook(
             "useApiForBindCard": frontend_config.get("useApiForBindCard").and_then(|v| v.as_u64()).unwrap_or(1),
             "cardIndex": selected_card_index.unwrap_or(0)
         });
-        
+
         // 添加代理配置
         if let Some(proxy_config) = frontend_config.get("proxy") {
             config_obj["proxy"] = proxy_config.clone();
         }
-        
+
         // 添加自定义浏览器路径
         if let Some(browser_path) = &custom_browser_path {
             config_obj["custom_browser_path"] = serde_json::Value::String(browser_path.clone());
             log_info!("🌐 添加自定义浏览器路径到配置: {}", browser_path);
         }
-        
+
         config_obj
     } else {
         // 使用默认配置
@@ -4929,18 +5427,17 @@ async fn register_with_outlook(
             "useApiForBindCard": 1,
             "cardIndex": selected_card_index.unwrap_or(0)
         });
-        
+
         // 添加自定义浏览器路径
         if let Some(browser_path) = &custom_browser_path {
             config_obj["custom_browser_path"] = serde_json::Value::String(browser_path.clone());
             log_info!("🌐 添加自定义浏览器路径到配置: {}", browser_path);
         }
-        
+
         config_obj
     };
-    
-    let config_json_str = serde_json::to_string(&final_config)
-        .unwrap_or_else(|_| "{}".to_string());
+
+    let config_json_str = serde_json::to_string(&final_config).unwrap_or_else(|_| "{}".to_string());
 
     // 生成任务ID用于隔离验证码文件（支持并行注册）
     let task_id = generate_task_id(&email);
@@ -4951,7 +5448,7 @@ async fn register_with_outlook(
     // 停止信号文件（用于 cancel_registration）
     let stop_file = temp_dir.join(format!("cursor_registration_stop_{}.txt", task_id));
     let stop_file_path = stop_file.to_string_lossy().to_string();
-    
+
     log_info!("🆔 任务ID: {}", task_id);
     log_info!("📄 验证码文件: {}", code_file_path);
 
@@ -4983,6 +5480,13 @@ async fn register_with_outlook(
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("无法启动注册进程: {}", e))?;
+
+    {
+        let pid = child.id();
+        let mut processes = REGISTRATION_PROCESSES.lock().unwrap();
+        processes.insert(task_id.clone(), pid);
+        log_info!("📝 已注册进程到管理器: task_id={}, pid={}", task_id, pid);
+    }
 
     let stdout = child.stdout.take().ok_or("无法获取stdout".to_string())?;
 
@@ -5048,7 +5552,10 @@ async fn register_with_outlook(
                                                 log_error!("❌ 发送验证码事件失败: {}", e);
                                             }
 
-                                            log_info!("✅ 验证码已自动填入临时文件: {}", code_file_task);
+                                            log_info!(
+                                                "✅ 验证码已自动填入临时文件: {}",
+                                                code_file_task
+                                            );
                                             return;
                                         }
                                         Err(e) => {
@@ -5451,7 +5958,11 @@ async fn register_codex_with_self_hosted_mail_api(
     let use_manual_verification = manual_verification.unwrap_or(false);
     log_info!(
         "🔄 使用 Codex 注册账户（验证码模式: {}）...",
-        if use_manual_verification { "手动输入" } else { "自建邮箱 API 自动获取" }
+        if use_manual_verification {
+            "手动输入"
+        } else {
+            "自建邮箱 API 自动获取"
+        }
     );
     log_info!("📧 注册邮箱: {}", email);
     if !use_manual_verification {
@@ -5461,7 +5972,10 @@ async fn register_codex_with_self_hosted_mail_api(
 
     let executable_path = get_python_executable_path_by_name("cdp_flow_runner")?;
     if !executable_path.exists() {
-        return Err(format!("找不到 Codex Python 可执行文件: {:?}", executable_path));
+        return Err(format!(
+            "找不到 Codex Python 可执行文件: {:?}",
+            executable_path
+        ));
     }
 
     let incognito_flag = if use_incognito.unwrap_or(true) {
@@ -5480,57 +5994,71 @@ async fn register_codex_with_self_hosted_mail_api(
     let continue_file_path = continue_file.to_string_lossy().to_string();
     let cancel_file_path = stop_file_path.clone();
 
-    let final_config = if let Some(frontend_config) = config {
+    let mut final_config = if let Some(frontend_config) = config {
         frontend_config
     } else {
         serde_json::json!({})
     };
-    let config_json_str = serde_json::to_string(&final_config).unwrap_or_else(|_| "{}".to_string());
+    let cdp_overrides = final_config
+        .get("codexCdpOverrides")
+        .cloned()
+        .map(|value| {
+            serde_json::from_value::<CodexCdpOverrides>(value)
+                .map_err(|e| format!("解析 Codex CDP 覆盖配置失败: {}", e))
+        })
+        .transpose()?;
+    if let Some(config_obj) = final_config.as_object_mut() {
+        config_obj.remove("codexCdpOverrides");
+    }
+    let config_json_str =
+        serde_json::to_string(&final_config).unwrap_or_else(|_| "{}".to_string());
     let email_config = get_email_config().await.ok();
     let access_password = email_config
         .as_ref()
         .map(|cfg| cfg.access_password.clone())
         .unwrap_or_else(|| "AUTOCURSOT_WUQI_2002".to_string());
+    let cdp_url = cdp_overrides
+        .as_ref()
+        .and_then(|overrides| overrides.url.clone())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "https://chatgpt.com/".to_string());
+    let cdp_steps = match cdp_overrides.as_ref().and_then(|overrides| overrides.steps.as_ref()) {
+        Some(steps) => parse_codex_cdp_cli_steps(steps, &email, &access_password)?,
+        None => default_codex_cdp_cli_steps(&email, &access_password),
+    };
+    let element_timeout = cdp_overrides
+        .as_ref()
+        .and_then(|overrides| overrides.element_timeout)
+        .unwrap_or(20.0);
+    let wait_after_open = cdp_overrides
+        .as_ref()
+        .and_then(|overrides| overrides.wait_after_open)
+        .unwrap_or(2.0);
+    let wait_after_action = cdp_overrides
+        .as_ref()
+        .and_then(|overrides| overrides.wait_after_action)
+        .unwrap_or(1.8);
+    let post_oauth_step1_py = cdp_overrides
+        .as_ref()
+        .and_then(|overrides| overrides.post_oauth_step1_py.clone())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "openai_oauth_step1.py".to_string());
 
     let mut cmd = create_hidden_command(&executable_path.to_string_lossy());
     cmd.arg("--url")
-        .arg("https://chatgpt.com/")
+        .arg(&cdp_url)
         .arg("--incognito")
         .arg(incognito_flag)
         .arg("--custom-config-json")
         .arg(&config_json_str)
-        .arg("--click")
-        .arg("css:button[class*='btn-secondary']")
-        .arg("--input")
-        .arg(format!("css:input#email={}", email))
-        .arg("--click")
-        .arg("css:button[type='submit']")
-        .arg("--input")
-        .arg(format!("css:input[type='password']={}", access_password))
-        .arg("--click")
-        .arg("css:button[type='submit']")
-        .arg("--input")
-        .arg("@name=otp=__AUTO__")
+        .arg("--wait-after-open")
+        .arg(wait_after_open.to_string())
         .arg("--element-timeout")
-        .arg("20")
+        .arg(element_timeout.to_string())
         .arg("--wait-after-action")
-        .arg("1.8")
-        .arg("--input")
-        .arg("@name=name=__RANDOM_EN_NAME__")
-        .arg("--click")
-        .arg("css:button[type='submit']")
-        .arg("--click")
-        .arg("css:button[type='submit']")
-        .arg("--input")
-        .arg("@name=age=25")
-        .arg("--click")
-        .arg("@name=allCheckboxes")
-        .arg("--click")
-        .arg("css:button[type='submit']")
-        .arg("--click")
-        .arg("xpath://button[@type='submit' and (contains(normalize-space(.), 'Yes') or contains(normalize-space(.), '确定'))]")
+        .arg(wait_after_action.to_string())
         .arg("--post-oauth-step1-py")
-        .arg("openai_oauth_step1.py")
+        .arg(&post_oauth_step1_py)
         .env("CURSOR_VERIFICATION_CODE_FILE", &code_file_path)
         .env("CURSOR_REGISTRATION_STOP_FILE", &stop_file_path)
         .env("CDP_FLOW_CONTINUE_FILE", &continue_file_path)
@@ -5538,8 +6066,27 @@ async fn register_codex_with_self_hosted_mail_api(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
+    for step in cdp_steps {
+        match step {
+            CodexCdpCliStep::Click {
+                selector,
+                wait_for_load,
+            } => {
+                if wait_for_load {
+                    cmd.arg("--click-wait-load").arg(selector);
+                } else {
+                    cmd.arg("--click").arg(selector);
+                }
+            }
+            CodexCdpCliStep::Input { selector, value } => {
+                cmd.arg("--input").arg(format!("{}={}", selector, value));
+            }
+        }
+    }
+
     log_info!("🚀 启动 Codex 可执行文件: {:?}", executable_path);
     log_info!("🧩 Codex 配置 JSON: {}", config_json_str);
+    log_info!("🧭 Codex CDP URL: {}", cdp_url);
 
     let mut child = cmd
         .spawn()
@@ -5604,12 +6151,18 @@ async fn register_codex_with_self_hosted_mail_api(
                             );
                             continue;
                         }
-                        log_info!("🔍 Codex 检测到验证码请求: task_id={}, email={}", task_id_for_stdout, email_for_stdout);
+                        log_info!(
+                            "🔍 Codex 检测到验证码请求: task_id={}, email={}",
+                            task_id_for_stdout,
+                            email_for_stdout
+                        );
                         if self_hosted_fetch_in_progress
                             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
                             .is_err()
                         {
-                            log_debug!("🔍 [Codex 自建邮箱] 已有验证码拉取任务在运行，跳过重复触发");
+                            log_debug!(
+                                "🔍 [Codex 自建邮箱] 已有验证码拉取任务在运行，跳过重复触发"
+                            );
                         } else {
                             let api_url_task = api_url.clone();
                             let api_headers_task = api_headers.clone();
@@ -5627,17 +6180,18 @@ async fn register_codex_with_self_hosted_mail_api(
                             std::thread::spawn(move || {
                                 let rt = tokio::runtime::Runtime::new().unwrap();
                                 rt.block_on(async {
-                                    let fetch_result = get_verification_code_from_self_hosted_mail_api(
-                                        &api_url_task,
-                                        &api_headers_task,
-                                        &api_path_task,
-                                        Some(&email_task),
-                                        clear_enabled,
-                                        clear_url_task.as_deref(),
-                                        clear_headers_task.as_deref(),
-                                        clear_method_task.as_deref(),
-                                    )
-                                    .await;
+                                    let fetch_result =
+                                        get_verification_code_from_self_hosted_mail_api(
+                                            &api_url_task,
+                                            &api_headers_task,
+                                            &api_path_task,
+                                            Some(&email_task),
+                                            clear_enabled,
+                                            clear_url_task.as_deref(),
+                                            clear_headers_task.as_deref(),
+                                            clear_method_task.as_deref(),
+                                        )
+                                        .await;
                                     fetch_flag.store(false, Ordering::SeqCst);
 
                                     match fetch_result {
@@ -5645,7 +6199,8 @@ async fn register_codex_with_self_hosted_mail_api(
                                             log_info!("🎯 Codex 自动获取到验证码: {}", code);
                                             let _ = std::fs::write(&code_file_task, &code);
                                             let _ = std::fs::write(&continue_file_task, "continue");
-                                            let _ = app_task.emit("verification-code-auto-filled", &code);
+                                            let _ = app_task
+                                                .emit("verification-code-auto-filled", &code);
                                         }
                                         Err(e) => {
                                             log_error!("❌ Codex 自动获取验证码失败: {}", e);
@@ -5744,7 +6299,9 @@ async fn register_codex_with_self_hosted_mail_api(
     }
 
     if !exit_status.success() {
-        let script_path = get_app_dir()?.join("python_scripts").join("cdp_flow_runner.py");
+        let script_path = get_app_dir()?
+            .join("python_scripts")
+            .join("cdp_flow_runner.py");
         let packaged_hint = format!("打包可执行文件: {:?}", executable_path);
         let source_hint = format!("源码脚本: {:?}", script_path);
         return Err(format!(
@@ -5788,8 +6345,8 @@ async fn register_with_self_hosted_mail_api(
     log_info!("👤 姓名: {} {}", first_name, last_name);
 
     let custom_browser_path = {
-        let restorer =
-            MachineIdRestorer::new().map_err(|e| format!("Failed to initialize restorer: {}", e))?;
+        let restorer = MachineIdRestorer::new()
+            .map_err(|e| format!("Failed to initialize restorer: {}", e))?;
         restorer.get_custom_browser_path()
     };
 
@@ -5799,12 +6356,12 @@ async fn register_with_self_hosted_mail_api(
         let bank_card_data: serde_json::Value = serde_json::from_str(&bank_card_config)
             .map_err(|e| format!("解析银行卡配置失败: {}", e))?;
 
-        let all_cards = if let Some(cards_array) = bank_card_data.get("cards").and_then(|v| v.as_array())
-        {
-            cards_array.clone()
-        } else {
-            vec![bank_card_data.clone()]
-        };
+        let all_cards =
+            if let Some(cards_array) = bank_card_data.get("cards").and_then(|v| v.as_array()) {
+                cards_array.clone()
+            } else {
+                vec![bank_card_data.clone()]
+            };
 
         if all_cards.is_empty() {
             return Err("银行卡配置为空，请先配置至少一张银行卡".to_string());
@@ -5913,6 +6470,13 @@ async fn register_with_self_hosted_mail_api(
         .spawn()
         .map_err(|e| format!("无法启动注册进程: {}", e))?;
 
+    {
+        let pid = child.id();
+        let mut processes = REGISTRATION_PROCESSES.lock().unwrap();
+        processes.insert(task_id.clone(), pid);
+        log_info!("📝 已注册进程到管理器: task_id={}, pid={}", task_id, pid);
+    }
+
     let stdout = child.stdout.take().ok_or("无法获取stdout".to_string())?;
     let stderr = child.stderr.take().ok_or("无法获取stderr".to_string())?;
 
@@ -5975,17 +6539,18 @@ async fn register_with_self_hosted_mail_api(
                             std::thread::spawn(move || {
                                 let rt = tokio::runtime::Runtime::new().unwrap();
                                 rt.block_on(async {
-                                    let fetch_result = get_verification_code_from_self_hosted_mail_api(
-                                        &api_url_task,
-                                        &api_headers_task,
-                                        &api_path_task,
-                                        Some(&email_task),
-                                        clear_enabled,
-                                        clear_url_task.as_deref(),
-                                        clear_headers_task.as_deref(),
-                                        clear_method_task.as_deref(),
-                                    )
-                                    .await;
+                                    let fetch_result =
+                                        get_verification_code_from_self_hosted_mail_api(
+                                            &api_url_task,
+                                            &api_headers_task,
+                                            &api_path_task,
+                                            Some(&email_task),
+                                            clear_enabled,
+                                            clear_url_task.as_deref(),
+                                            clear_headers_task.as_deref(),
+                                            clear_method_task.as_deref(),
+                                        )
+                                        .await;
                                     fetch_flag.store(false, Ordering::SeqCst);
 
                                     match fetch_result {
@@ -5995,8 +6560,8 @@ async fn register_with_self_hosted_mail_api(
                                                 log_error!("❌ 写入验证码文件失败: {}", e);
                                                 return;
                                             }
-                                            if let Err(e) =
-                                                app_task.emit("verification-code-auto-filled", &code)
+                                            if let Err(e) = app_task
+                                                .emit("verification-code-auto-filled", &code)
                                             {
                                                 log_error!("❌ 发送验证码事件失败: {}", e);
                                             }
@@ -6076,6 +6641,12 @@ async fn register_with_self_hosted_mail_api(
 
     let _ = stdout_task.join();
 
+    {
+        let mut processes = REGISTRATION_PROCESSES.lock().unwrap();
+        processes.remove(&task_id);
+        log_info!("📝 已从管理器移除进程: task_id={}", task_id);
+    }
+
     if !exit_status.success() {
         return Err(format!(
             "Python脚本执行失败，退出码: {:?}",
@@ -6092,7 +6663,10 @@ async fn register_with_self_hosted_mail_api(
 }
 
 #[tauri::command]
-async fn submit_verification_code(code: String, task_id: Option<String>) -> Result<serde_json::Value, String> {
+async fn submit_verification_code(
+    code: String,
+    task_id: Option<String>,
+) -> Result<serde_json::Value, String> {
     log_info!("🔢 接收到验证码: {}", code);
 
     // 验证验证码格式
@@ -6102,7 +6676,7 @@ async fn submit_verification_code(code: String, task_id: Option<String>) -> Resu
 
     // 将验证码写入临时文件，供Python脚本读取
     let temp_dir = std::env::temp_dir();
-    
+
     // 如果提供了task_id，使用对应的文件名（用于并行注册）
     // 否则使用默认文件名（向后兼容单个注册）
     let code_file = if let Some(tid) = task_id {
@@ -6133,7 +6707,7 @@ async fn submit_verification_code(code: String, task_id: Option<String>) -> Resu
 async fn cancel_registration() -> Result<String, String> {
     // 通过文件通知所有正在运行的注册进程停止
     let processes = REGISTRATION_PROCESSES.lock().unwrap();
-    
+
     if processes.is_empty() {
         log_info!("ℹ️ 没有正在运行的注册进程");
         return Ok("没有正在运行的注册进程".to_string());
@@ -6153,9 +6727,13 @@ async fn cancel_registration() -> Result<String, String> {
     // 为每个任务写入停止信号文件
     for (task_id, pid) in &task_entries {
         let stop_file = temp_dir.join(format!("cursor_registration_stop_{}.txt", task_id));
-        
-        log_info!("🚫 正在写入停止信号文件: task_id={}, file={:?}", task_id, stop_file);
-        
+
+        log_info!(
+            "🚫 正在写入停止信号文件: task_id={}, file={:?}",
+            task_id,
+            stop_file
+        );
+
         match fs::write(&stop_file, "stop") {
             Ok(_) => {
                 notified_count += 1;
@@ -6166,40 +6744,16 @@ async fn cancel_registration() -> Result<String, String> {
             }
         }
 
-        // 额外主动终止进程，避免脚本卡住导致无法及时退出。
-        #[cfg(target_os = "windows")]
-        {
-            let kill_result = std::process::Command::new("taskkill")
-                .args(["/PID", &pid.to_string(), "/T", "/F"])
-                .output();
-            match kill_result {
-                Ok(output) if output.status.success() => {
-                    killed_count += 1;
-                    log_info!("🛑 已强制终止进程: task_id={}, pid={}", task_id, pid);
-                }
-                Ok(output) => {
-                    log_warn!(
-                        "⚠️ 终止进程失败: task_id={}, pid={}, status={:?}",
-                        task_id,
-                        pid,
-                        output.status.code()
-                    );
-                }
-                Err(e) => {
-                    log_warn!("⚠️ 调用 taskkill 失败: task_id={}, pid={}, err={}", task_id, pid, e);
-                }
-            }
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            let kill_result = std::process::Command::new("kill")
-                .args(["-9", &pid.to_string()])
-                .output();
-            if let Ok(output) = kill_result {
-                if output.status.success() {
-                    killed_count += 1;
-                }
-            }
+        // 额外主动终止整个进程树，避免子进程（如 cdp_flow_runner）残留。
+        if terminate_process_tree(*pid) {
+            killed_count += 1;
+            log_info!("🛑 已终止注册进程树: task_id={}, pid={}", task_id, pid);
+        } else {
+            log_warn!(
+                "⚠️ 终止进程树失败或进程已退出: task_id={}, pid={}",
+                task_id,
+                pid
+            );
         }
     }
 
@@ -6273,44 +6827,59 @@ async fn get_saved_accounts() -> Result<Vec<serde_json::Value>, String> {
 #[tauri::command]
 async fn check_and_convert_bank_card_config() -> Result<String, String> {
     log_info!("🔍 检查并转换银行卡配置格式...");
-    
+
     // 读取当前配置
     let config_str = read_bank_card_config().await?;
-    let config_data: serde_json::Value = serde_json::from_str(&config_str)
-        .map_err(|e| format!("解析银行卡配置失败: {}", e))?;
-    
+    let config_data: serde_json::Value =
+        serde_json::from_str(&config_str).map_err(|e| format!("解析银行卡配置失败: {}", e))?;
+
     // 检查是否已经是数组格式
-    if config_data.get("cards").and_then(|v| v.as_array()).is_some() {
+    if config_data
+        .get("cards")
+        .and_then(|v| v.as_array())
+        .is_some()
+    {
         log_info!("✅ 银行卡配置已经是数组格式，无需转换");
         return Ok("配置格式正确，无需转换".to_string());
     }
-    
+
     log_info!("🔄 检测到旧格式配置，开始转换为数组格式...");
-    
+
     // 检查是否包含必需的银行卡字段
     let required_fields = [
-        "cardNumber", "cardExpiry", "cardCvc", "billingName", 
-        "billingCountry", "billingPostalCode", "billingAdministrativeArea",
-        "billingLocality", "billingDependentLocality", "billingAddressLine1"
+        "cardNumber",
+        "cardExpiry",
+        "cardCvc",
+        "billingName",
+        "billingCountry",
+        "billingPostalCode",
+        "billingAdministrativeArea",
+        "billingLocality",
+        "billingDependentLocality",
+        "billingAddressLine1",
     ];
-    
+
     for field in &required_fields {
-        if !config_data.get(field).and_then(|v| v.as_str()).map_or(false, |s| !s.is_empty()) {
+        if !config_data
+            .get(field)
+            .and_then(|v| v.as_str())
+            .map_or(false, |s| !s.is_empty())
+        {
             return Err(format!("银行卡配置缺少必需字段: {}", field));
         }
     }
-    
+
     // 转换为数组格式
     let new_config = serde_json::json!({
         "cards": [config_data]
     });
-    
+
     // 保存转换后的配置
-    let new_config_str = serde_json::to_string_pretty(&new_config)
-        .map_err(|e| format!("序列化配置失败: {}", e))?;
-    
+    let new_config_str =
+        serde_json::to_string_pretty(&new_config).map_err(|e| format!("序列化配置失败: {}", e))?;
+
     save_bank_card_config(new_config_str.clone()).await?;
-    
+
     log_info!("✅ 银行卡配置已成功转换为数组格式并保存");
     Ok("配置已转换为数组格式".to_string())
 }
@@ -6360,12 +6929,12 @@ async fn backup_bank_card_config() -> Result<String, String> {
     let backup_path = app_dir.join("bank_card_config.backup.json");
 
     if config_path.exists() {
-        let config_content = fs::read_to_string(&config_path)
-            .map_err(|e| format!("读取银行卡配置失败: {}", e))?;
-        
+        let config_content =
+            fs::read_to_string(&config_path).map_err(|e| format!("读取银行卡配置失败: {}", e))?;
+
         fs::write(&backup_path, &config_content)
             .map_err(|e| format!("备份银行卡配置失败: {}", e))?;
-        
+
         log_info!("✅ 银行卡配置已备份到: {:?}", backup_path);
         Ok(config_content)
     } else {
@@ -6382,16 +6951,16 @@ async fn restore_bank_card_config() -> Result<(), String> {
     let backup_path = app_dir.join("bank_card_config.backup.json");
 
     if backup_path.exists() {
-        let backup_content = fs::read_to_string(&backup_path)
-            .map_err(|e| format!("读取备份配置失败: {}", e))?;
-        
+        let backup_content =
+            fs::read_to_string(&backup_path).map_err(|e| format!("读取备份配置失败: {}", e))?;
+
         if !backup_content.is_empty() {
             fs::write(&config_path, backup_content)
                 .map_err(|e| format!("恢复银行卡配置失败: {}", e))?;
-            
+
             log_info!("✅ 银行卡配置已从备份恢复");
         }
-        
+
         // 删除备份文件
         let _ = fs::remove_file(&backup_path);
     }
@@ -6440,7 +7009,6 @@ async fn get_app_version(app: tauri::AppHandle) -> Result<String, String> {
     let package_info = app.package_info();
     Ok(package_info.version.to_string())
 }
-
 
 // 打开更新链接
 #[tauri::command]
@@ -6516,7 +7084,6 @@ async fn get_email_config() -> Result<EmailConfig, String> {
     }
 }
 
-
 #[tauri::command]
 async fn auto_login_and_get_cookie(
     app: tauri::AppHandle,
@@ -6540,8 +7107,15 @@ async fn auto_login_and_get_cookie(
 
     // 根据参数决定是否显示窗口
     let should_show_window = show_window.unwrap_or(false);
-    log_info!("🖥️ 窗口显示设置: {}", if should_show_window { "显示" } else { "隐藏" });
-    
+    log_info!(
+        "🖥️ 窗口显示设置: {}",
+        if should_show_window {
+            "显示"
+        } else {
+            "隐藏"
+        }
+    );
+
     // 创建新的 WebView 窗口（根据配置显示/隐藏，启用无痕模式）
     let webview_window = tauri::WebviewWindowBuilder::new(
         &app,
@@ -6556,7 +7130,7 @@ async fn auto_login_and_get_cookie(
     .on_page_load(move |window, _payload| {
         let email_clone = email.clone();
         let password_clone = password.clone();
-        
+
         // 创建自动登录脚本
         let login_script = format!(
             r#"
@@ -6715,8 +7289,15 @@ async fn auto_login_and_get_cookie(
             } else {
                 "正在后台执行自动登录流程..."
             };
-            log_info!("✅ Successfully created auto login WebView window ({})", if should_show_window { "visible" } else { "hidden" });
-            
+            log_info!(
+                "✅ Successfully created auto login WebView window ({})",
+                if should_show_window {
+                    "visible"
+                } else {
+                    "hidden"
+                }
+            );
+
             Ok(serde_json::json!({
                 "success": true,
                 "message": message
@@ -6745,7 +7326,10 @@ async fn verification_code_login(
     if let Some(existing_window) = app.get_webview_window("verification_code_login") {
         log_info!("🔄 关闭现有的验证码登录窗口");
         if let Err(e) = existing_window.close() {
-            log_error!("❌ Failed to close existing verification code login window: {}", e);
+            log_error!(
+                "❌ Failed to close existing verification code login window: {}",
+                e
+            );
         } else {
             log_info!("✅ Existing verification code login window closed successfully");
         }
@@ -6755,8 +7339,15 @@ async fn verification_code_login(
 
     // 根据参数决定是否显示窗口
     let should_show_window = show_window.unwrap_or(false);
-    log_info!("🖥️ 窗口显示设置: {}", if should_show_window { "显示" } else { "隐藏" });
-    
+    log_info!(
+        "🖥️ 窗口显示设置: {}",
+        if should_show_window {
+            "显示"
+        } else {
+            "隐藏"
+        }
+    );
+
     // 创建新的 WebView 窗口（根据配置显示/隐藏，启用无痕模式）
     let webview_window = tauri::WebviewWindowBuilder::new(
         &app,
@@ -6944,15 +7535,25 @@ async fn verification_code_login(
             } else {
                 "正在后台执行验证码登录流程..."
             };
-            log_info!("✅ Successfully created verification code login WebView window ({})", if should_show_window { "visible" } else { "hidden" });
-            
+            log_info!(
+                "✅ Successfully created verification code login WebView window ({})",
+                if should_show_window {
+                    "visible"
+                } else {
+                    "hidden"
+                }
+            );
+
             Ok(serde_json::json!({
                 "success": true,
                 "message": message
             }))
         }
         Err(e) => {
-            log_error!("❌ Failed to create verification code login WebView window: {}", e);
+            log_error!(
+                "❌ Failed to create verification code login WebView window: {}",
+                e
+            );
             Ok(serde_json::json!({
                 "success": false,
                 "message": format!("无法打开验证码登录窗口: {}", e)
@@ -6964,7 +7565,7 @@ async fn verification_code_login(
 #[tauri::command]
 async fn check_verification_login_cookies(app: tauri::AppHandle) -> Result<(), String> {
     log_info!("🔍 开始检查验证码登录Cookie");
-    
+
     if let Some(window) = app.get_webview_window("verification_code_login") {
         // 尝试多个可能的URL来获取cookie
         let urls_to_try = vec![
@@ -6973,35 +7574,47 @@ async fn check_verification_login_cookies(app: tauri::AppHandle) -> Result<(), S
             "https://app.cursor.com/",
             "https://www.cursor.com/",
         ];
-        
+
         for url_str in urls_to_try {
             log_info!("🔍 尝试从 {} 获取cookie", url_str);
-            let url = url_str.parse().map_err(|e| format!("Invalid URL {}: {}", url_str, e))?;
-        
+            let url = url_str
+                .parse()
+                .map_err(|e| format!("Invalid URL {}: {}", url_str, e))?;
+
             match window.cookies_for_url(url) {
                 Ok(cookies) => {
                     log_info!("📋 从 {} 找到 {} 个cookie", url_str, cookies.len());
-                    
+
                     // 查找 WorkosCursorSessionToken
                     for cookie in cookies {
-                        log_info!("🍪 Cookie: {} = {}...", cookie.name(), &cookie.value()[..cookie.value().len().min(20)]);
-                        
+                        log_info!(
+                            "🍪 Cookie: {} = {}...",
+                            cookie.name(),
+                            &cookie.value()[..cookie.value().len().min(20)]
+                        );
+
                         if cookie.name() == "WorkosCursorSessionToken" {
                             let token = cookie.value().to_string();
-                            log_info!("✅ 找到 WorkosCursorSessionToken: {}...", &token[..token.len().min(50)]);
-                            
+                            log_info!(
+                                "✅ 找到 WorkosCursorSessionToken: {}...",
+                                &token[..token.len().min(50)]
+                            );
+
                             // 发送事件到前端
-                            let _ = app.emit("verification-login-cookie-found", serde_json::json!({
-                                "WorkosCursorSessionToken": token
-                            }));
-                            
+                            let _ = app.emit(
+                                "verification-login-cookie-found",
+                                serde_json::json!({
+                                    "WorkosCursorSessionToken": token
+                                }),
+                            );
+
                             // 关闭窗口
                             if let Err(e) = window.close() {
                                 log_error!("❌ 关闭验证码登录窗口失败: {}", e);
                             } else {
                                 log_info!("✅ 验证码登录窗口已关闭");
                             }
-                            
+
                             return Ok(());
                         }
                     }
@@ -7011,7 +7624,7 @@ async fn check_verification_login_cookies(app: tauri::AppHandle) -> Result<(), S
                 }
             }
         }
-        
+
         log_error!("❌ 未找到 WorkosCursorSessionToken");
         Err("未找到登录Token".to_string())
     } else {
@@ -7023,7 +7636,7 @@ async fn check_verification_login_cookies(app: tauri::AppHandle) -> Result<(), S
 #[tauri::command]
 async fn check_login_cookies(app: tauri::AppHandle) -> Result<(), String> {
     log_info!("🔍 开始检查登录Cookie");
-    
+
     if let Some(window) = app.get_webview_window("auto_login") {
         // 尝试多个可能的URL来获取cookie
         let urls_to_try = vec![
@@ -7032,39 +7645,52 @@ async fn check_login_cookies(app: tauri::AppHandle) -> Result<(), String> {
             "https://app.cursor.com/",
             "https://www.cursor.com/",
         ];
-        
+
         for url_str in urls_to_try {
             log_info!("🔍 尝试从 {} 获取cookie", url_str);
-            let url = url_str.parse().map_err(|e| format!("Invalid URL {}: {}", url_str, e))?;
-        
+            let url = url_str
+                .parse()
+                .map_err(|e| format!("Invalid URL {}: {}", url_str, e))?;
+
             match window.cookies_for_url(url) {
                 Ok(cookies) => {
                     log_info!("📋 从 {} 找到 {} 个cookie", url_str, cookies.len());
-                    
+
                     // 查找 WorkosCursorSessionToken
                     for cookie in cookies {
-                        log_info!("🍪 Cookie: {} = {}...", cookie.name(), &cookie.value()[..cookie.value().len().min(20)]);
-                        
+                        log_info!(
+                            "🍪 Cookie: {} = {}...",
+                            cookie.name(),
+                            &cookie.value()[..cookie.value().len().min(20)]
+                        );
+
                         if cookie.name() == "WorkosCursorSessionToken" {
                             let token = cookie.value().to_string();
-                            log_info!("🎉 在 {} 找到 WorkosCursorSessionToken: {}...", url_str, &token[..token.len().min(20)]);
-                            
+                            log_info!(
+                                "🎉 在 {} 找到 WorkosCursorSessionToken: {}...",
+                                url_str,
+                                &token[..token.len().min(20)]
+                            );
+
                             // 关闭自动登录窗口
                             if let Err(e) = window.close() {
                                 log_error!("❌ Failed to close auto login window: {}", e);
                             } else {
                                 log_info!("✅ Auto login window closed successfully");
                             }
-                            
+
                             // 发送事件通知前端获取到了token
-                            if let Err(e) = app.emit("auto-login-success", serde_json::json!({
-                                "token": token
-                            })) {
+                            if let Err(e) = app.emit(
+                                "auto-login-success",
+                                serde_json::json!({
+                                    "token": token
+                                }),
+                            ) {
                                 log_error!("❌ Failed to emit auto login success event: {}", e);
                             } else {
                                 log_info!("✅ Auto login success event emitted");
                             }
-                            
+
                             return Ok(());
                         }
                     }
@@ -7074,33 +7700,39 @@ async fn check_login_cookies(app: tauri::AppHandle) -> Result<(), String> {
                 }
             }
         }
-        
+
         // 如果所有URL都没找到目标cookie
         log_info!("⏳ 在所有URL中都未找到 WorkosCursorSessionToken");
-        if let Err(e) = app.emit("auto-login-failed", serde_json::json!({
-            "error": "未找到 WorkosCursorSessionToken cookie"
-        })) {
+        if let Err(e) = app.emit(
+            "auto-login-failed",
+            serde_json::json!({
+                "error": "未找到 WorkosCursorSessionToken cookie"
+            }),
+        ) {
             log_error!("❌ Failed to emit auto login failed event: {}", e);
         }
     } else {
         log_error!("❌ 未找到自动登录窗口");
-        if let Err(e) = app.emit("auto-login-failed", serde_json::json!({
-            "error": "未找到自动登录窗口"
-        })) {
+        if let Err(e) = app.emit(
+            "auto-login-failed",
+            serde_json::json!({
+                "error": "未找到自动登录窗口"
+            }),
+        ) {
             log_error!("❌ Failed to emit auto login failed event: {}", e);
         }
     }
-    
+
     Ok(())
 }
 
 #[tauri::command]
-async fn auto_login_success(
-    app: tauri::AppHandle,
-    token: String,
-) -> Result<(), String> {
-    log_info!("🎉 自动登录成功，获取到Token: {}...", &token[..token.len().min(20)]);
-    
+async fn auto_login_success(app: tauri::AppHandle, token: String) -> Result<(), String> {
+    log_info!(
+        "🎉 自动登录成功，获取到Token: {}...",
+        &token[..token.len().min(20)]
+    );
+
     // 关闭自动登录窗口
     if let Some(window) = app.get_webview_window("auto_login") {
         if let Err(e) = window.close() {
@@ -7109,37 +7741,43 @@ async fn auto_login_success(
             log_info!("✅ Auto login window closed successfully");
         }
     }
-    
+
     // 发送事件通知前端获取到了token
-    if let Err(e) = app.emit("auto-login-success", serde_json::json!({
-        "token": token
-    })) {
+    if let Err(e) = app.emit(
+        "auto-login-success",
+        serde_json::json!({
+            "token": token
+        }),
+    ) {
         log_error!("❌ Failed to emit auto login success event: {}", e);
     } else {
         log_info!("✅ Auto login success event emitted");
     }
-    
+
     Ok(())
 }
 
 #[tauri::command]
 async fn auto_login_failed(app: tauri::AppHandle, error: String) -> Result<(), String> {
     log_error!("❌ 自动登录失败: {}", error);
-    
+
     // 关闭自动登录窗口
     if let Some(window) = app.get_webview_window("auto_login") {
         if let Err(e) = window.close() {
             log_error!("❌ Failed to close auto login window: {}", e);
         }
     }
-    
+
     // 发送事件通知前端登录失败
-    if let Err(e) = app.emit("auto-login-failed", serde_json::json!({
-        "error": error
-    })) {
+    if let Err(e) = app.emit(
+        "auto-login-failed",
+        serde_json::json!({
+            "error": error
+        }),
+    ) {
         log_error!("❌ Failed to emit auto login failed event: {}", e);
     }
-    
+
     Ok(())
 }
 
@@ -7188,18 +7826,16 @@ async fn open_cursor_dashboard(
     match webview_window {
         Ok(window) => {
             // 添加窗口关闭事件监听器
-            window.on_window_event(move |event| {
-                match event {
-                    tauri::WindowEvent::CloseRequested { .. } => {
-                        log_info!("🔄 Cursor dashboard window close requested by user");
-                    }
-                    tauri::WindowEvent::Destroyed => {
-                        log_info!("🔄 Cursor dashboard window destroyed");
-                    }
-                    _ => {}
+            window.on_window_event(move |event| match event {
+                tauri::WindowEvent::CloseRequested { .. } => {
+                    log_info!("🔄 Cursor dashboard window close requested by user");
                 }
+                tauri::WindowEvent::Destroyed => {
+                    log_info!("🔄 Cursor dashboard window destroyed");
+                }
+                _ => {}
             });
-            
+
             log_info!("✅ Successfully opened Cursor dashboard window");
             Ok(serde_json::json!({
                 "success": true,
@@ -7233,7 +7869,6 @@ async fn show_auto_login_window(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-
 // ==================== Web服务器管理 ====================
 
 #[tauri::command]
@@ -7241,7 +7876,7 @@ async fn get_web_server_port() -> Result<u16, String> {
     // 从配置文件读取端口，默认34567
     let app_dir = get_app_dir()?;
     let config_path = app_dir.join("web_server_config.json");
-    
+
     if config_path.exists() {
         match std::fs::read_to_string(&config_path) {
             Ok(content) => {
@@ -7256,7 +7891,7 @@ async fn get_web_server_port() -> Result<u16, String> {
             }
         }
     }
-    
+
     Ok(34567) // 默认端口
 }
 
@@ -7264,11 +7899,11 @@ async fn get_web_server_port() -> Result<u16, String> {
 async fn set_web_server_port(port: u16) -> Result<String, String> {
     let app_dir = get_app_dir()?;
     let config_path = app_dir.join("web_server_config.json");
-    
+
     let config = serde_json::json!({
         "port": port
     });
-    
+
     match std::fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()) {
         Ok(_) => {
             log_info!("Web服务器端口已设置为: {}", port);
@@ -7292,7 +7927,7 @@ async fn get_seamless_switch_web_config() -> Result<serde_json::Value, String> {
 #[tauri::command]
 async fn start_web_server() -> Result<serde_json::Value, String> {
     log_info!("🌐 [CMD] 收到启动Web服务器命令");
-    
+
     // 获取配置的端口
     let port = match get_web_server_port().await {
         Ok(port) => port,
@@ -7303,7 +7938,7 @@ async fn start_web_server() -> Result<serde_json::Value, String> {
     };
 
     log_info!("🌐 准备启动Web服务器，端口: {}", port);
-    
+
     // 使用tokio::spawn在后台启动Web服务器
     tokio::spawn(async move {
         let web_server = NextWorkWebServer::new(port);
@@ -7348,8 +7983,8 @@ async fn get_seamless_switch_full_status() -> Result<serde_json::Value, String> 
             "extension_host_modified": status.extension_host_modified,
             "fully_enabled": status.fully_enabled,
             "need_reset_warning": status.need_reset_warning,
-            "message": if status.fully_enabled { 
-                "无感换号+无感重置ID功能已完全启用" 
+            "message": if status.fully_enabled {
+                "无感换号+无感重置ID功能已完全启用"
             } else if status.workbench_modified {
                 "无感换号已启用，但无感重置ID未启用"
             } else {
@@ -7373,7 +8008,7 @@ async fn enable_seamless_switch() -> Result<serde_json::Value, String> {
         Ok(message) => {
             // 启用成功后，自动重启Cursor（如果正在运行）
             log_info!("🔄 [DEBUG] 无感换号启用成功，准备重启Cursor...");
-            
+
             // 使用现有的switch_account逻辑来重启Cursor
             match AccountManager::force_kill_cursor_processes() {
                 Ok(killed_count) => {
@@ -7383,10 +8018,10 @@ async fn enable_seamless_switch() -> Result<serde_json::Value, String> {
                     log_warn!("⚠️ [DEBUG] 强制结束Cursor进程时出错: {}", e);
                 }
             }
-            
+
             // 等待进程结束
             std::thread::sleep(std::time::Duration::from_millis(2000));
-            
+
             // 重启Cursor
             match AccountManager::start_cursor() {
                 Ok(()) => {
@@ -7398,7 +8033,11 @@ async fn enable_seamless_switch() -> Result<serde_json::Value, String> {
             }
 
             // 初始化Web服务器配置文件为空状态（刚启用时没有token）
-            if let Err(e) = NextWorkWebServer::write_seamless_switch_config(&next_work_web::SeamlessSwitchStatus::default()).await {
+            if let Err(e) = NextWorkWebServer::write_seamless_switch_config(
+                &next_work_web::SeamlessSwitchStatus::default(),
+            )
+            .await
+            {
                 log_warn!("⚠️ [DEBUG] 初始化Web配置失败: {}", e);
             }
 
@@ -7420,7 +8059,7 @@ async fn disable_seamless_switch() -> Result<serde_json::Value, String> {
         Ok(message) => {
             // 禁用成功后，自动重启Cursor（如果正在运行）
             log_info!("🔄 [DEBUG] 无感换号禁用成功，准备重启Cursor...");
-            
+
             // 使用现有的switch_account逻辑来重启Cursor
             match AccountManager::force_kill_cursor_processes() {
                 Ok(killed_count) => {
@@ -7430,10 +8069,10 @@ async fn disable_seamless_switch() -> Result<serde_json::Value, String> {
                     log_warn!("⚠️ [DEBUG] 强制结束Cursor进程时出错: {}", e);
                 }
             }
-            
+
             // 等待进程结束
             std::thread::sleep(std::time::Duration::from_millis(2000));
-            
+
             // 重启Cursor
             match AccountManager::start_cursor() {
                 Ok(()) => {
@@ -7456,33 +8095,31 @@ async fn disable_seamless_switch() -> Result<serde_json::Value, String> {
     }
 }
 
-
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // 当用户尝试启动第二个实例时，显示并聚焦现有窗口
             log_info!("🔔 [SINGLE_INSTANCE] 检测到第二个实例启动请求，显示并聚焦现有窗口");
-            
+
             if let Some(window) = app.get_webview_window("main") {
                 // 显示窗口（如果被隐藏）
                 if let Err(e) = window.show() {
                     log_error!("❌ [SINGLE_INSTANCE] 显示窗口失败: {}", e);
                 }
-                
+
                 // 取消最小化（如果被最小化）
                 if let Err(e) = window.unminimize() {
                     log_error!("❌ [SINGLE_INSTANCE] 取消最小化失败: {}", e);
                 }
-                
+
                 // 聚焦窗口
                 if let Err(e) = window.set_focus() {
                     log_error!("❌ [SINGLE_INSTANCE] 聚焦窗口失败: {}", e);
                 } else {
                     log_info!("✅ [SINGLE_INSTANCE] 窗口已显示并聚焦");
                 }
-                
+
                 // macOS 特殊处理：激活应用程序
                 #[cfg(target_os = "macos")]
                 {
@@ -7559,9 +8196,9 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 // 延迟一下确保应用完全启动
                 tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
-                
+
                 log_info!("🌐 [STARTUP] 应用启动完成，开始启动Web服务器...");
-                
+
                 // 获取配置的端口
                 let port = match get_web_server_port().await {
                     Ok(port) => port,
@@ -7572,13 +8209,13 @@ pub fn run() {
                 };
 
                 log_info!("🌐 准备启动Web服务器，端口: {}", port);
-                
+
                 let web_server = NextWorkWebServer::new(port);
                 if let Err(e) = web_server.start().await {
                     log_error!("❌ Web服务器启动失败: {}", e);
                 } else {
                     log_info!("✅ Web服务器启动成功，监听端口: {}", port);
-                    
+
                     // 启动后刷新符合条件的账户缓存
                     log_info!("🔄 [STARTUP] 开始刷新账户缓存...");
                     match NextWorkWebServer::refresh_eligible_accounts_cache().await {

@@ -66,7 +66,10 @@ impl MachineIdRestorer {
     pub fn new() -> Result<Self> {
         let (db_path, sqlite_path) = Self::get_cursor_paths()?;
 
-        Ok(Self { db_path, sqlite_path })
+        Ok(Self {
+            db_path,
+            sqlite_path,
+        })
     }
 
     // 日志记录方法
@@ -1092,7 +1095,10 @@ impl MachineIdRestorer {
             if let Some(custom_path) = restorer.get_custom_cursor_path() {
                 let custom_product_json = PathBuf::from(&custom_path).join("product.json");
 
-                log_info!("🎯 [DEBUG] 使用自定义product.json路径: {:?}", custom_product_json);
+                log_info!(
+                    "🎯 [DEBUG] 使用自定义product.json路径: {:?}",
+                    custom_product_json
+                );
                 log_info!(
                     "🎯 [DEBUG] 自定义product.json存在: {}",
                     custom_product_json.exists()
@@ -1167,7 +1173,8 @@ impl MachineIdRestorer {
 
         #[cfg(target_os = "macos")]
         {
-            let product_path = PathBuf::from("/Applications/Cursor.app/Contents/Resources/app/product.json");
+            let product_path =
+                PathBuf::from("/Applications/Cursor.app/Contents/Resources/app/product.json");
             Ok(product_path)
         }
 
@@ -1202,17 +1209,20 @@ impl MachineIdRestorer {
 
         if !product_path.exists() {
             log_error!("❌ [DEBUG] product.json文件不存在: {:?}", product_path);
-            return Err(anyhow::anyhow!("product.json文件不存在: {:?}", product_path));
+            return Err(anyhow::anyhow!(
+                "product.json文件不存在: {:?}",
+                product_path
+            ));
         }
 
         log_info!("📖 [DEBUG] 读取product.json文件: {:?}", product_path);
 
         // 读取文件内容
-        let content = fs::read_to_string(&product_path)
-            .context("Failed to read product.json file")?;
+        let content =
+            fs::read_to_string(&product_path).context("Failed to read product.json file")?;
 
-        let mut data: serde_json::Value = serde_json::from_str(&content)
-            .context("Failed to parse product.json file")?;
+        let mut data: serde_json::Value =
+            serde_json::from_str(&content).context("Failed to parse product.json file")?;
 
         // 检查是否有 checksums 字段
         if data.get("checksums").is_some() {
@@ -1222,7 +1232,7 @@ impl MachineIdRestorer {
             let backup_path = product_path.with_file_name("product.json.wuqi.back");
             if !backup_path.exists() {
                 log_info!("📋 [DEBUG] 创建备份文件: {:?}", backup_path);
-                
+
                 // 设置文件为可写
                 #[cfg(unix)]
                 {
@@ -1294,7 +1304,10 @@ impl MachineIdRestorer {
 
             log_info!("🔒 [DEBUG] 文件已设置为只读");
 
-            Ok(format!("已成功删除product.json中的checksums字段: {:?}", product_path))
+            Ok(format!(
+                "已成功删除product.json中的checksums字段: {:?}",
+                product_path
+            ))
         } else {
             log_info!("ℹ️ [DEBUG] product.json中没有checksums字段，无需处理");
             Ok("product.json中没有checksums字段，无需处理".to_string())
@@ -1449,7 +1462,10 @@ impl MachineIdRestorer {
                     .join("node")
                     .join("extensionHostProcess.js");
 
-                log_info!("🎯 [DEBUG] 使用自定义extensionHostProcess路径: {:?}", custom_extension);
+                log_info!(
+                    "🎯 [DEBUG] 使用自定义extensionHostProcess路径: {:?}",
+                    custom_extension
+                );
                 log_info!(
                     "🎯 [DEBUG] 自定义extensionHostProcess存在: {}",
                     custom_extension.exists()
@@ -1517,7 +1533,10 @@ impl MachineIdRestorer {
                     i + 1,
                     extension_path
                 );
-                log_debug!("🔍 [DEBUG] extensionHostProcess存在: {}", extension_path.exists());
+                log_debug!(
+                    "🔍 [DEBUG] extensionHostProcess存在: {}",
+                    extension_path.exists()
+                );
 
                 if extension_path.exists() {
                     log_info!(
@@ -1597,7 +1616,10 @@ impl MachineIdRestorer {
         let extension_path = Self::get_extension_host_process_js_path()?;
 
         if !extension_path.exists() {
-            log_warn!("⚠️ [DEBUG] extensionHostProcess文件不存在: {:?}", extension_path);
+            log_warn!(
+                "⚠️ [DEBUG] extensionHostProcess文件不存在: {:?}",
+                extension_path
+            );
             return Ok(false);
         }
 
@@ -1643,24 +1665,27 @@ impl MachineIdRestorer {
 
         Ok(has_wuqi_hook && has_store_hook && has_error_hook && has_polling_script)
     }
-    
+
     // 获取完整的无感换号状态（包括 extensionHostProcess 修改状态）
     pub fn get_seamless_switch_full_status() -> Result<SeamlessSwitchStatus> {
         let workbench_modified = Self::check_seamless_switch_status().unwrap_or(false);
         let extension_host_modified = Self::check_extension_host_modified().unwrap_or(false);
-        
+
         // 如果 workbench 已修改但 extensionHostProcess 未修改，需要警告
         let need_reset_warning = workbench_modified && !extension_host_modified;
-        
+
         // 只有两者都修改了才算完全启用
         let fully_enabled = workbench_modified && extension_host_modified;
-        
+
         log_info!("🔍 [DEBUG] 无感换号完整状态:");
         log_info!("🔍 [DEBUG] - workbench已修改: {}", workbench_modified);
-        log_info!("🔍 [DEBUG] - extensionHost已修改: {}", extension_host_modified);
+        log_info!(
+            "🔍 [DEBUG] - extensionHost已修改: {}",
+            extension_host_modified
+        );
         log_info!("🔍 [DEBUG] - 完全启用: {}", fully_enabled);
         log_info!("🔍 [DEBUG] - 需要重置警告: {}", need_reset_warning);
-        
+
         Ok(SeamlessSwitchStatus {
             workbench_modified,
             extension_host_modified,
@@ -1672,39 +1697,50 @@ impl MachineIdRestorer {
     // 修改 extensionHostProcess.js 文件
     pub fn modify_extension_host_process() -> Result<()> {
         log_info!("🔧 [DEBUG] 开始修改 extensionHostProcess.js 文件...");
-        
+
         let extension_path = Self::get_extension_host_process_js_path()?;
 
         if !extension_path.exists() {
-            log_error!("❌ [DEBUG] extensionHostProcess文件不存在: {:?}", extension_path);
-            return Err(anyhow::anyhow!("extensionHostProcess文件不存在: {:?}", extension_path));
+            log_error!(
+                "❌ [DEBUG] extensionHostProcess文件不存在: {:?}",
+                extension_path
+            );
+            return Err(anyhow::anyhow!(
+                "extensionHostProcess文件不存在: {:?}",
+                extension_path
+            ));
         }
 
         // 创建备份
         let backup_path = extension_path.with_file_name("extensionHostProcess.js.wuqi.back");
         if !backup_path.exists() {
-            log_info!("📋 [DEBUG] 创建extensionHostProcess备份文件: {:?}", backup_path);
-            fs::copy(&extension_path, &backup_path).context("Failed to create extensionHostProcess backup")?;
+            log_info!(
+                "📋 [DEBUG] 创建extensionHostProcess备份文件: {:?}",
+                backup_path
+            );
+            fs::copy(&extension_path, &backup_path)
+                .context("Failed to create extensionHostProcess backup")?;
         } else {
             log_info!("ℹ️ [DEBUG] extensionHostProcess备份文件已存在，跳过备份");
         }
 
         // 从备份文件读取原始内容
-        let mut content = fs::read_to_string(&backup_path).context("Failed to read extensionHostProcess backup")?;
+        let mut content = fs::read_to_string(&backup_path)
+            .context("Failed to read extensionHostProcess backup")?;
 
         log_info!("📖 [DEBUG] 从extensionHostProcess备份文件读取原始内容");
 
-        // 使用正则表达式替换 header.set("x-cursor-checksum",...) 
+        // 使用正则表达式替换 header.set("x-cursor-checksum",...)
         // 模式：header.set("x-cursor-checksum", VAR1===void 0?`${VAR2}${VAR3}`:`${VAR2}${VAR3}/${VAR1}`)
         // 替换为：header.set("x-cursor-checksum", VAR1===void 0?`${VAR2}${global.MachineId||VAR3}`:`${VAR2}${global.MachineId||VAR3}/${global.MacMachineId||VAR1}`)
-        
+
         use regex::Regex;
-        
+
         // 匹配模式：header.set("x-cursor-checksum", 变量名===void 0?`${变量1}${变量2}`:`${变量1}${变量2}/${变量名}`)
         let re = Regex::new(
             r#"header\.set\("x-cursor-checksum",\s*(\w+)\s*===\s*void\s+0\s*\?\s*`\$\{(\w+)\}\$\{(\w+)\}`\s*:\s*`\$\{(\w+)\}\$\{(\w+)\}/\$\{(\w+)\}`\)"#
         ).context("Failed to create regex")?;
-        
+
         // 执行正则替换
         if re.is_match(&content) {
             content = re.replace_all(&content, |caps: &regex::Captures| {
@@ -1723,11 +1759,13 @@ impl MachineIdRestorer {
                     var1, var2, var3, var4, var5, var6
                 )
             }).to_string();
-            
+
             log_info!("✅ [DEBUG] 成功替换 x-cursor-checksum 设置代码");
         } else {
             log_warn!("⚠️ [DEBUG] 未找到需要替换的 x-cursor-checksum 代码");
-            return Err(anyhow::anyhow!("未找到需要替换的内容，可能extensionHostProcess文件格式已变化"));
+            return Err(anyhow::anyhow!(
+                "未找到需要替换的内容，可能extensionHostProcess文件格式已变化"
+            ));
         }
 
         // 注入获取配置的代码（包含轮询功能）
@@ -1785,7 +1823,8 @@ impl MachineIdRestorer {
         log_info!("✅ [DEBUG] 成功注入机器ID初始化代码");
 
         // 写入修改后的内容
-        fs::write(&extension_path, content).context("Failed to write modified extensionHostProcess file")?;
+        fs::write(&extension_path, content)
+            .context("Failed to write modified extensionHostProcess file")?;
 
         log_info!("✅ [DEBUG] extensionHostProcess.js 修改成功");
         Ok(())
@@ -1794,17 +1833,25 @@ impl MachineIdRestorer {
     // 恢复 extensionHostProcess.js 文件
     pub fn restore_extension_host_process() -> Result<()> {
         log_info!("🔄 [DEBUG] 开始恢复 extensionHostProcess.js 文件...");
-        
+
         let extension_path = Self::get_extension_host_process_js_path()?;
         let backup_path = extension_path.with_file_name("extensionHostProcess.js.wuqi.back");
 
         if !backup_path.exists() {
-            log_error!("❌ [DEBUG] extensionHostProcess备份文件不存在: {:?}", backup_path);
-            return Err(anyhow::anyhow!("extensionHostProcess备份文件不存在，无法恢复"));
+            log_error!(
+                "❌ [DEBUG] extensionHostProcess备份文件不存在: {:?}",
+                backup_path
+            );
+            return Err(anyhow::anyhow!(
+                "extensionHostProcess备份文件不存在，无法恢复"
+            ));
         }
 
         if !extension_path.exists() {
-            log_error!("❌ [DEBUG] extensionHostProcess文件不存在: {:?}", extension_path);
+            log_error!(
+                "❌ [DEBUG] extensionHostProcess文件不存在: {:?}",
+                extension_path
+            );
             return Err(anyhow::anyhow!("extensionHostProcess文件不存在"));
         }
 
@@ -1869,11 +1916,14 @@ impl MachineIdRestorer {
             r"this\.storeAccessRefreshToken=\(([$_a-zA-Z][$_a-zA-Z0-9]*(?:\s*,\s*[$_a-zA-Z][$_a-zA-Z0-9]*)*)\)"
         )
         .context("Failed to create regex")?;
-        if re.is_match(&content) && !content.contains("this.storeAccessRefreshToken=window.wuqi=(") {
-            content = re.replace_all(&content, |caps: &regex::Captures| {
-                let params = &caps[1];
-                format!("this.storeAccessRefreshToken=window.wuqi=({})", params)
-            }).to_string();
+        if re.is_match(&content) && !content.contains("this.storeAccessRefreshToken=window.wuqi=(")
+        {
+            content = re
+                .replace_all(&content, |caps: &regex::Captures| {
+                    let params = &caps[1];
+                    format!("this.storeAccessRefreshToken=window.wuqi=({})", params)
+                })
+                .to_string();
             log_info!("✅ [DEBUG] 完成第一个替换：添加wuqi hook");
             modified = true;
         }
@@ -1948,13 +1998,15 @@ impl MachineIdRestorer {
         };
 
         // 定义注入标记，用于检测和清理旧的注入
-        let seamless_start_marker = "// ==================== SEAMLESS SWITCH INJECTION - START ====================";
-        let seamless_end_marker = "// ==================== SEAMLESS SWITCH INJECTION - END ====================";
-        
+        let seamless_start_marker =
+            "// ==================== SEAMLESS SWITCH INJECTION - START ====================";
+        let seamless_end_marker =
+            "// ==================== SEAMLESS SWITCH INJECTION - END ====================";
+
         // 定义旧的 Email 注入标记（来自 inject_email_update_js 函数）
         let old_email_start_marker = "// Email update injection - START";
         let old_email_end_marker = "// Email update injection - END";
-        
+
         // 清理旧的 Email 注入代码（如果存在）
         if let Some(start_pos) = content.find(old_email_start_marker) {
             if let Some(end_pos) = content.find(old_email_end_marker) {
@@ -2473,7 +2525,8 @@ impl MachineIdRestorer {
         };
 
         // 写入修改后的内容
-        fs::write(&workbench_path, final_content).context("Failed to write modified workbench file")?;
+        fs::write(&workbench_path, final_content)
+            .context("Failed to write modified workbench file")?;
 
         log_info!("✅ [DEBUG] workbench文件修改完成");
 
@@ -2484,7 +2537,10 @@ impl MachineIdRestorer {
                 log_info!("✅ [DEBUG] extensionHostProcess.js处理成功");
             }
             Err(e) => {
-                log_warn!("⚠️ [DEBUG] extensionHostProcess.js处理失败（继续执行）: {}", e);
+                log_warn!(
+                    "⚠️ [DEBUG] extensionHostProcess.js处理失败（继续执行）: {}",
+                    e
+                );
                 // 如果 extensionHostProcess 修改失败，不影响整体流程
             }
         }
@@ -2523,7 +2579,10 @@ impl MachineIdRestorer {
                 log_info!("✅ [DEBUG] extensionHostProcess.js恢复成功");
             }
             Err(e) => {
-                log_warn!("⚠️ [DEBUG] extensionHostProcess.js恢复失败（继续执行）: {}", e);
+                log_warn!(
+                    "⚠️ [DEBUG] extensionHostProcess.js恢复失败（继续执行）: {}",
+                    e
+                );
                 // 如果 extensionHostProcess 恢复失败，不影响整体流程
             }
         }

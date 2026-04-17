@@ -656,7 +656,7 @@ impl AuthChecker {
     /// Get email from storage.json
     fn get_email_from_storage() -> Option<String> {
         use fs2::FileExt;
-        
+
         if let Some(storage_path) = Self::get_cursor_storage_path() {
             // 使用共享锁进行读取操作
             if let Ok(file) = std::fs::File::open(&storage_path) {
@@ -1906,7 +1906,8 @@ impl AuthChecker {
                                     }
                                 }
 
-                                details.push("Subscription info retrieved successfully".to_string());
+                                details
+                                    .push("Subscription info retrieved successfully".to_string());
                             } else {
                                 details.push("Failed to parse subscription JSON data".to_string());
                             }

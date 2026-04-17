@@ -3,6 +3,7 @@ import json
 import os
 import re
 import random
+import subprocess
 import sys
 import time
 import tempfile
@@ -608,6 +609,107 @@ def _wait_page_loaded(page: Any, timeout_s: float = 20.0) -> bool:
     return False
 
 
+def _navigate_front_window_via_macos_applescript(url: str) -> bool:
+    """
+    macOS incognito windows can expose a different CDP target from the visible tab.
+    Navigate Chrome's front window tab via AppleScript so it does not depend on UI focus.
+    """
+    safe_url = json.dumps(url)
+    script = f"""
+tell application "Google Chrome"
+    activate
+    if (count of windows) is 0 then error "Google Chrome has no open windows"
+    set URL of active tab of front window to {safe_url}
+end tell
+"""
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", script],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+    except Exception as e:
+        _safe_print(f"{Fore.YELLOW}⚠️ macOS AppleScript 导航执行失败: {e}{Style.RESET_ALL}")
+        return False
+
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        _safe_print(f"{Fore.YELLOW}⚠️ macOS AppleScript 导航失败: {detail}{Style.RESET_ALL}")
+        return False
+
+    _safe_print(f"{Fore.CYAN}🧭 通过 macOS 前台窗口标签页直接打开目标 URL{Style.RESET_ALL}")
+    return True
+
+
+def _rebind_page_to_loaded_url(browser_page: Any, url: str, timeout_s: float = 8.0) -> Any:
+    """
+    After external navigation (AppleScript), rebind CDP control to the tab that
+    actually loaded the target URL.
+    """
+    browser = getattr(browser_page, "browser", None)
+    if browser is None:
+        return browser_page
+
+    parsed = urlparse(url)
+    url_candidates = [url]
+    if parsed.scheme and parsed.netloc:
+        url_candidates.append(f"{parsed.scheme}://{parsed.netloc}")
+        url_candidates.append(parsed.netloc)
+
+    end_at = time.time() + max(0.5, timeout_s)
+    while time.time() < end_at:
+        for candidate in url_candidates:
+            try:
+                tabs = browser._get_tabs(url=candidate, tab_type="page", mix=False)  # type: ignore[attr-defined]
+            except Exception:
+                tabs = []
+            if tabs:
+                tab = tabs[0]
+                try:
+                    setter = getattr(tab, "set", None)
+                    activate = getattr(setter, "activate", None)
+                    if callable(activate):
+                        activate()
+                except Exception:
+                    pass
+                try:
+                    current_url = getattr(tab, "url", "")
+                except Exception:
+                    current_url = ""
+                _safe_print(
+                    f"{Fore.CYAN}🔗 CDP 已重新绑定到真实标签页: {current_url or candidate}{Style.RESET_ALL}"
+                )
+                return tab
+        time.sleep(0.25)
+
+    _safe_print(f"{Fore.YELLOW}⚠️ 未找到已加载目标 URL 的真实标签页，暂时沿用当前 CDP 页对象{Style.RESET_ALL}")
+    return browser_page
+
+
+def _open_primary_flow_page(browser_page: Any, url: str) -> Any:
+    """
+    Open the target URL in the main visible page whenever possible.
+
+    On macOS incognito windows, the ChromiumPage object may bind to a hidden
+    target. Prefer the visible omnibox so the actual front window navigates.
+    """
+    browser = getattr(browser_page, "browser", None)
+    if sys.platform == "darwin" and browser is not None:
+        is_incognito = False
+        try:
+            is_incognito = bool(getattr(browser, "states", None) and browser.states.is_incognito)
+        except Exception:
+            is_incognito = False
+        if is_incognito and _navigate_front_window_via_macos_applescript(url):
+            time.sleep(1.2)
+            return _rebind_page_to_loaded_url(browser_page, url)
+
+    browser_page.get(url)
+    return browser_page
+
+
 def _is_oauth_callback_url(url: str, redirect_uri: str) -> bool:
     u = (url or "").strip()
     r = (redirect_uri or "").strip()
@@ -872,15 +974,19 @@ def run_flow(
         except Exception:
             custom_config = None
 
-    config, page = setup_driver(translator=None, use_incognito=use_incognito, custom_config=custom_config)
+    config, browser_page = setup_driver(
+        translator=None, use_incognito=use_incognito, custom_config=custom_config
+    )
 
     try:
-        page.get("about:blank")
-        time.sleep(0.5)
-
         _safe_print(f"{Fore.CYAN}🌐 打开: {url}{Style.RESET_ALL}")
-        page.get(url)
+        page = _open_primary_flow_page(browser_page, url)
+        _wait_page_loaded(page, timeout_s=max(10.0, wait_after_open_s + 8.0))
         time.sleep(max(0.0, wait_after_open_s))
+        try:
+            _safe_print(f"{Fore.CYAN}📍 初始页面 URL: {page.url}{Style.RESET_ALL}")
+        except Exception:
+            _safe_print(f"{Fore.YELLOW}⚠️ 初始页面 URL 读取失败{Style.RESET_ALL}")
 
         ordered_steps: List[Tuple[str, str]] = []
         register_email_hint = ""
@@ -894,12 +1000,19 @@ def run_flow(
                 ordered_steps.append(("input", f"{sel}={val}"))
 
         for kind, payload in ordered_steps:
-            if kind == "click":
+            if kind in ("click", "click_wait_load"):
                 sel = payload
                 ok = _try_click(page, sel, timeout_s=element_timeout_s)
                 _safe_print(
                     f"{Fore.CYAN}🖱️ click {sel!r}: {('OK' if ok else 'MISS')}{Style.RESET_ALL}"
                 )
+                if ok and kind == "click_wait_load":
+                    loaded = _wait_page_loaded(
+                        page, timeout_s=max(10.0, element_timeout_s + 8.0)
+                    )
+                    _safe_print(
+                        f"{Fore.CYAN}⏳ wait_page_loaded after click {sel!r}: {('OK' if loaded else 'TIMEOUT')}{Style.RESET_ALL}"
+                    )
                 time.sleep(max(0.0, wait_after_action_s))
                 continue
 
@@ -956,7 +1069,7 @@ def run_flow(
             _safe_print(f"{Fore.YELLOW}⚠️ 未知 step 类型: {kind!r}{Style.RESET_ALL}")
 
         if post_oauth_step1_py:
-            _run_post_oauth_step1_in_same_browser(page, register_email_hint)
+            _run_post_oauth_step1_in_same_browser(browser_page, register_email_hint)
 
         # 默认不阻塞等待 continue_file：输出提示后即可结束流程，避免长时间挂起。
         # 如需保留旧行为，可设置 CDP_FLOW_REQUIRE_CONTINUE=true。
@@ -1002,7 +1115,7 @@ def run_flow(
         keep_open = os.environ.get("CDP_FLOW_KEEP_BROWSER_OPEN", "1").lower() in ("1", "true", "yes", "y")
         if not keep_open:
             try:
-                page.quit()
+                browser_page.quit()
             except Exception:
                 pass
 
@@ -1026,6 +1139,8 @@ def _parse_ordered_steps_from_argv(argv: List[str]) -> List[Tuple[str, str]]:
     Supports both:
       --click "<selector>"
       --click="<selector>"
+      --click-wait-load "<selector>"
+      --click-wait-load="<selector>"
       --input "<selector>=<value>"
       --input="<selector>=<value>"
     """
@@ -1040,6 +1155,16 @@ def _parse_ordered_steps_from_argv(argv: List[str]) -> List[Tuple[str, str]]:
                 continue
         if tok.startswith("--click="):
             steps.append(("click", tok.split("=", 1)[1]))
+            i += 1
+            continue
+
+        if tok == "--click-wait-load":
+            if i + 1 < len(argv):
+                steps.append(("click_wait_load", argv[i + 1]))
+                i += 2
+                continue
+        if tok.startswith("--click-wait-load="):
+            steps.append(("click_wait_load", tok.split("=", 1)[1]))
             i += 1
             continue
 
@@ -1063,6 +1188,12 @@ def main() -> None:
     parser.add_argument("--incognito", default="true", help="是否无痕：true/false")
     parser.add_argument("--custom-config-json", default=None, help="透传给 setup_driver 的 JSON 配置（字符串）")
     parser.add_argument("--click", action="append", default=[], help="要点击的 selector（可多次传入）")
+    parser.add_argument(
+        "--click-wait-load",
+        action="append",
+        default=[],
+        help="点击后等待页面加载完成的 selector（可多次传入，主要用于保持参数顺序解析）",
+    )
     parser.add_argument(
         "--input",
         action="append",

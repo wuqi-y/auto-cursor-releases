@@ -44,6 +44,64 @@ interface RegistrationResult {
   };
 }
 
+type CodexCdpStep =
+  | {
+      type: "click";
+      selector: string;
+      waitForLoad?: boolean;
+    }
+  | {
+      type: "input";
+      selector: string;
+      value: string;
+    };
+
+interface CodexCdpOverrides {
+  url?: string;
+  steps?: CodexCdpStep[];
+  waitAfterOpen?: number;
+  waitAfterAction?: number;
+  elementTimeout?: number;
+  postOauthStep1Py?: string;
+}
+
+const DEFAULT_CODEX_CDP_OVERRIDES: CodexCdpOverrides = {
+  url: "https://auth.openai.com/log-in/",
+  steps: [
+    { type: "click", selector: "css:a", waitForLoad: true },
+    {
+      type: "click",
+      selector: "css:a[data-discover='true']",
+      waitForLoad: true,
+    },
+    { type: "input", selector: "css:input[type='email']", value: "__REGISTER_EMAIL__" },
+    { type: "click", selector: "css:button[type='submit']" },
+    { type: "input", selector: "css:input[type='password']", value: "__ACCESS_PASSWORD__" },
+    { type: "click", selector: "css:button[type='submit']" },
+    { type: "input", selector: "@name=otp", value: "__AUTO__" },
+    { type: "input", selector: "@name=name", value: "__RANDOM_EN_NAME__" },
+    { type: "click", selector: "css:button[type='submit']" },
+    { type: "click", selector: "css:button[type='submit']" },
+    { type: "input", selector: "@name=age", value: "25" },
+    { type: "click", selector: "@name=allCheckboxes" },
+    { type: "click", selector: "css:button[type='submit']" },
+    {
+      type: "click",
+      selector:
+        "xpath://button[@type='submit' and (contains(normalize-space(.), 'Yes') or contains(normalize-space(.), '确定'))]",
+    },
+  ],
+  elementTimeout: 20,
+  waitAfterAction: 1.8,
+  postOauthStep1Py: "openai_oauth_step1.py",
+};
+
+const DEFAULT_CODEX_CDP_OVERRIDES_JSON = JSON.stringify(
+  DEFAULT_CODEX_CDP_OVERRIDES,
+  null,
+  2
+);
+
 const isRegistrationSuccessResult = (result: RegistrationResult | null): boolean => {
   if (!result) return false;
 
@@ -98,6 +156,9 @@ export const AutoRegisterPage: React.FC = () => {
     useState('{\n  "Authorization": "Bearer ",\n  "Content-Type": "application/json"\n}');
   const [selfHostedMailClearMethod, setSelfHostedMailClearMethod] =
     useState("DELETE");
+  const [codexCdpOverridesJson, setCodexCdpOverridesJson] = useState(
+    DEFAULT_CODEX_CDP_OVERRIDES_JSON
+  );
 
   const [useIncognito, setUseIncognito] = useState(true);
   const [enableBankCardBinding, setEnableBankCardBinding] = useState(true);
@@ -162,6 +223,8 @@ export const AutoRegisterPage: React.FC = () => {
     setCodexSelfHostedMailClearHeadersJson: setCachedCodexSelfHostedMailClearHeadersJson,
     getCodexSelfHostedMailClearMethod,
     setCodexSelfHostedMailClearMethod: setCachedCodexSelfHostedMailClearMethod,
+    getCodexCdpOverridesJson,
+    setCodexCdpOverridesJson: setCachedCodexCdpOverridesJson,
     getRegistrationProvider,
     setRegistrationProvider: setCachedRegistrationProvider,
   } = useConfigStore();
@@ -193,6 +256,7 @@ export const AutoRegisterPage: React.FC = () => {
   const batchCountRef = useRef(1);
   const isBatchRegisteringRef = useRef(false);
   const cancelledStopTaskIdsRef = useRef<Set<string>>(new Set());
+  const registrationRunIdRef = useRef(0);
   const [showBankCardConfig, setShowBankCardConfig] = useState(false);
   const [bankCardConfig, setBankCardConfig] = useState<BankCardConfig | null>(
     null
@@ -650,6 +714,99 @@ export const AutoRegisterPage: React.FC = () => {
     }
   };
 
+  const parseCodexCdpOverrides = (): CodexCdpOverrides | null => {
+    try {
+      const parsed = JSON.parse(codexCdpOverridesJson) as unknown;
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        throw new Error("顶层必须是 JSON 对象");
+      }
+
+      const overrides = parsed as CodexCdpOverrides;
+      if (overrides.url !== undefined && typeof overrides.url !== "string") {
+        throw new Error("url 必须是字符串");
+      }
+      if (
+        overrides.waitAfterOpen !== undefined &&
+        typeof overrides.waitAfterOpen !== "number"
+      ) {
+        throw new Error("waitAfterOpen 必须是数字");
+      }
+      if (
+        overrides.waitAfterAction !== undefined &&
+        typeof overrides.waitAfterAction !== "number"
+      ) {
+        throw new Error("waitAfterAction 必须是数字");
+      }
+      if (
+        overrides.elementTimeout !== undefined &&
+        typeof overrides.elementTimeout !== "number"
+      ) {
+        throw new Error("elementTimeout 必须是数字");
+      }
+      if (
+        overrides.postOauthStep1Py !== undefined &&
+        typeof overrides.postOauthStep1Py !== "string"
+      ) {
+        throw new Error("postOauthStep1Py 必须是字符串");
+      }
+
+      if (overrides.steps !== undefined) {
+        if (!Array.isArray(overrides.steps)) {
+          throw new Error("steps 必须是数组");
+        }
+        overrides.steps.forEach((step, index) => {
+          if (!step || typeof step !== "object") {
+            throw new Error(`steps[${index}] 必须是对象`);
+          }
+          if (step.type !== "click" && step.type !== "input") {
+            throw new Error(`steps[${index}].type 仅支持 click 或 input`);
+          }
+          if (typeof step.selector !== "string" || !step.selector.trim()) {
+            throw new Error(`steps[${index}].selector 不能为空字符串`);
+          }
+          if (
+            "waitForLoad" in step &&
+            step.waitForLoad !== undefined &&
+            typeof step.waitForLoad !== "boolean"
+          ) {
+            throw new Error(`steps[${index}].waitForLoad 必须是布尔值`);
+          }
+          if (step.type === "input" && typeof step.value !== "string") {
+            throw new Error(`steps[${index}].value 必须是字符串`);
+          }
+        });
+      }
+
+      return overrides;
+    } catch (error) {
+      setToast({
+        message: `Codex CDP 配置 JSON 无效: ${error}`,
+        type: "error",
+      });
+      return null;
+    }
+  };
+
+  const beginRegistrationRun = () => {
+    registrationRunIdRef.current += 1;
+    return registrationRunIdRef.current;
+  };
+
+  const invalidateActiveRegistrationRun = () => {
+    registrationRunIdRef.current += 1;
+  };
+
+  const resetRegistrationUiState = () => {
+    setIsLoading(false);
+    setIsRegistering(false);
+    isBatchRegisteringRef.current = false;
+    cancelledStopTaskIdsRef.current.clear();
+    setShowVerificationModal(false);
+    setVerificationCode("");
+    setCurrentTaskId(null);
+    setCurrentTaskEmail(null);
+  };
+
   const handleVerificationCodeSubmit = async () => {
     if (!verificationCode || verificationCode.length !== 6) {
       setToast({ message: "请输入6位验证码", type: "error" });
@@ -677,17 +834,16 @@ export const AutoRegisterPage: React.FC = () => {
   };
 
   const handleCancelRegistration = async () => {
+    invalidateActiveRegistrationRun();
+    resetRegistrationUiState();
     try {
       await invoke("cancel_registration");
-      setShowVerificationModal(false);
-      setVerificationCode("");
-      // 清除任务信息
-      setCurrentTaskId(null);
-      setCurrentTaskEmail(null);
-      setIsRegistering(false);
       setToast({ message: "注册已取消", type: "info" });
     } catch (error) {
-      setToast({ message: `取消注册失败: ${error}`, type: "error" });
+      setToast({
+        message: `注册状态已重置，但停止后端进程失败: ${error}`,
+        type: "error",
+      });
     }
   };
 
@@ -929,6 +1085,11 @@ export const AutoRegisterPage: React.FC = () => {
     isBatchRegisteringRef.current = false;
 
     if (!validateForm()) return;
+    const runId = beginRegistrationRun();
+    const codexCdpOverrides = isCodexProvider ? parseCodexCdpOverrides() : null;
+    if (isCodexProvider && !codexCdpOverrides) {
+      return;
+    }
 
     // 如果使用 Tempmail，先清空邮箱
     if (emailType === "tempmail") {
@@ -949,6 +1110,9 @@ export const AutoRegisterPage: React.FC = () => {
         tempmailEmail,
         tempmailPin || undefined
       );
+      if (runId !== registrationRunIdRef.current) {
+        return;
+      }
       if (cleared) {
         setToast({
           message: "✅ Tempmail 邮箱已清空，开始注册...",
@@ -965,6 +1129,7 @@ export const AutoRegisterPage: React.FC = () => {
     setIsLoading(true);
     setIsRegistering(true);
     setRegistrationResult(null);
+    cancelledStopTaskIdsRef.current.clear();
     realtimeOutputRef.current = []; // 清空ref
     setRealtimeOutput([]); // 清空之前的输出
     setToast({ message: `开始注册${activeProviderLabel}账户...`, type: "info" });
@@ -1090,6 +1255,7 @@ export const AutoRegisterPage: React.FC = () => {
               emailType === "custom",
               {
                 proxy: sharedConfig.proxy,
+                codexCdpOverrides,
               }
             )
           : await CursorService.registerWithSelfHostedMailApi(
@@ -1171,6 +1337,9 @@ export const AutoRegisterPage: React.FC = () => {
         });
       }
 
+      if (runId !== registrationRunIdRef.current) {
+        return;
+      }
       setRegistrationResult(result);
 
       // 调试：打印收到的结果
@@ -1205,15 +1374,18 @@ export const AutoRegisterPage: React.FC = () => {
         setToast({ message: result.message || "注册失败", type: "error" });
       }
     } catch (error) {
+      if (runId !== registrationRunIdRef.current) {
+        return;
+      }
       console.error("Registration error:", error);
       setToast({
         message: `注册失败: ${error}`,
         type: "error",
       });
     } finally {
-      setIsLoading(false);
-      setIsRegistering(false);
-      isBatchRegisteringRef.current = false;
+      if (runId === registrationRunIdRef.current) {
+        resetRegistrationUiState();
+      }
     }
   };
 
@@ -1240,6 +1412,11 @@ export const AutoRegisterPage: React.FC = () => {
   const handleBatchRegister = async () => {
     // 批量注册模式
     isBatchRegisteringRef.current = true;
+    const runId = beginRegistrationRun();
+    const codexCdpOverrides = isCodexProvider ? parseCodexCdpOverrides() : null;
+    if (isCodexProvider && !codexCdpOverrides) {
+      return;
+    }
 
     // if (batchCount < 1 || batchCount > 3) {
     //   setToast({ message: "注册数量必须在1-3之间", type: "error" });
@@ -1359,6 +1536,9 @@ export const AutoRegisterPage: React.FC = () => {
         tempmailEmail,
         tempmailPin || undefined
       );
+      if (runId !== registrationRunIdRef.current) {
+        return;
+      }
       console.log(batchCount, "batchCount");
 
       if (cleared) {
@@ -1410,6 +1590,7 @@ export const AutoRegisterPage: React.FC = () => {
     setIsLoading(true);
     setIsRegistering(true);
     setRegistrationResult(null);
+    cancelledStopTaskIdsRef.current.clear();
     realtimeOutputRef.current = [];
     setRealtimeOutput([]);
     setToast({
@@ -1473,6 +1654,7 @@ export const AutoRegisterPage: React.FC = () => {
                 socks_proxy: proxyType === "socks" ? socksProxy : "",
                 no_proxy: noProxy,
               },
+              codexCdpOverrides,
             }
           : {
               subscriptionTier: subscriptionTier,
@@ -1491,6 +1673,9 @@ export const AutoRegisterPage: React.FC = () => {
         maxConcurrent: batchCount,
       });
 
+      if (runId !== registrationRunIdRef.current) {
+        return;
+      }
       console.log("批量注册结果:", result);
 
       if (result.success) {
@@ -1516,11 +1701,15 @@ export const AutoRegisterPage: React.FC = () => {
         setToast({ message: result.message || "批量注册失败", type: "error" });
       }
     } catch (error) {
+      if (runId !== registrationRunIdRef.current) {
+        return;
+      }
       console.error("批量注册错误:", error);
       setToast({ message: `批量注册失败: ${error}`, type: "error" });
     } finally {
-      setIsLoading(false);
-      setIsRegistering(false);
+      if (runId === registrationRunIdRef.current) {
+        resetRegistrationUiState();
+      }
     }
   };
 
@@ -1753,6 +1942,7 @@ export const AutoRegisterPage: React.FC = () => {
     const codexClearUrl = getCodexSelfHostedMailClearUrl();
     const codexClearHdr = getCodexSelfHostedMailClearHeadersJson();
     const codexClearMethod = getCodexSelfHostedMailClearMethod();
+    const codexCdpJson = getCodexCdpOverridesJson();
 
     const activeProvider = cachedProvider ?? "cursor";
     const activeUrl = activeProvider === "codex" ? codexUrl ?? cursorUrl : cursorUrl;
@@ -1779,6 +1969,7 @@ export const AutoRegisterPage: React.FC = () => {
     if (activeClearUrl) setSelfHostedMailClearUrl(activeClearUrl);
     if (activeClearHdr) setSelfHostedMailClearHeadersJson(activeClearHdr);
     if (activeClearMethod) setSelfHostedMailClearMethod(activeClearMethod);
+    if (codexCdpJson) setCodexCdpOverridesJson(codexCdpJson);
   }, [
     getRegistrationProvider,
     getTempmailEmail,
@@ -1801,6 +1992,7 @@ export const AutoRegisterPage: React.FC = () => {
     getCodexSelfHostedMailClearUrl,
     getCodexSelfHostedMailClearHeadersJson,
     getCodexSelfHostedMailClearMethod,
+    getCodexCdpOverridesJson,
   ]);
 
   return (
@@ -2347,6 +2539,57 @@ export const AutoRegisterPage: React.FC = () => {
                         </div>
                       </div>
                     )}
+                  </div>
+                </div>
+              )}
+
+              {isCodexProvider && (
+                <div className="space-y-4 sm:col-span-2">
+                  <div className="status-info rounded-md p-3">
+                    <p className="text-sm text-blue-800">
+                      Codex CDP 参数可在这里直接覆盖。`incognito` 与
+                      `custom-config-json` 仍由程序固定控制，这里只开放 URL、步骤、超时和附加脚本。
+                    </p>
+                    <p className="mt-2 text-xs text-blue-700">
+                      支持的步骤格式：`click` / `input`。其中 `input.value`
+                      可以继续使用 `__AUTO__`、`__RANDOM_EN_NAME__`、`__REGISTER_EMAIL__`、`__ACCESS_PASSWORD__`
+                      这类占位符。点击步骤支持 `waitForLoad: true`，用于点击后等待页面加载完成。
+                    </p>
+                  </div>
+
+                  <div>
+                    <div className="flex items-center justify-between">
+                      <label
+                        htmlFor="codex-cdp-overrides"
+                        className="block text-sm font-medium text-slate-700 dark:text-slate-300"
+                      >
+                        Codex CDP 配置（JSON）
+                      </label>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => {
+                          setCodexCdpOverridesJson(DEFAULT_CODEX_CDP_OVERRIDES_JSON);
+                          setCachedCodexCdpOverridesJson(
+                            DEFAULT_CODEX_CDP_OVERRIDES_JSON
+                          );
+                        }}
+                      >
+                        重置默认
+                      </Button>
+                    </div>
+                    <textarea
+                      id="codex-cdp-overrides"
+                      rows={18}
+                      value={codexCdpOverridesJson}
+                      onChange={(e) => {
+                        const value = e.target.value;
+                        setCodexCdpOverridesJson(value);
+                        setCachedCodexCdpOverridesJson(value);
+                      }}
+                      className="field-input mt-1 font-mono text-xs"
+                      spellCheck={false}
+                    />
                   </div>
                 </div>
               )}
