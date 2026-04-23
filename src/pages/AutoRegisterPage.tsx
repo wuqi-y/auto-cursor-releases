@@ -44,6 +44,29 @@ interface RegistrationResult {
   };
 }
 
+interface BatchProgressEventPayload {
+  provider?: string;
+  mode?: string;
+  index?: number;
+  email?: string;
+  success?: boolean;
+  error?: string;
+  completed?: number;
+  total?: number;
+  succeeded?: number;
+  failed?: number;
+}
+
+interface CodexManualActionPayload {
+  task_id?: string | null;
+  email?: string | null;
+  reason?: string;
+  message?: string;
+  status?: string;
+  continue_file?: string | null;
+  cancel_file?: string | null;
+}
+
 type CodexCdpStep =
   | {
       type: "click";
@@ -101,6 +124,7 @@ const DEFAULT_CODEX_CDP_OVERRIDES_JSON = JSON.stringify(
   null,
   2
 );
+const DEFAULT_BATCH_SERIAL_DELAY_SECONDS = 10;
 
 const isRegistrationSuccessResult = (result: RegistrationResult | null): boolean => {
   if (!result) return false;
@@ -195,6 +219,8 @@ export const AutoRegisterPage: React.FC = () => {
     setEnableBankCardBinding: setCachedEnableBankCardBinding,
     getUseParallelMode,
     setUseParallelMode: setCachedUseParallelMode,
+    getBatchSerialDelaySeconds,
+    setBatchSerialDelaySeconds: setCachedBatchSerialDelaySeconds,
     getSelfHostedMailUrl,
     setSelfHostedMailUrl: setCachedSelfHostedMailUrl,
     getSelfHostedMailHeadersJson,
@@ -247,6 +273,9 @@ export const AutoRegisterPage: React.FC = () => {
   const [showPassword, setShowPassword] = useState(false);
   const [showVerificationModal, setShowVerificationModal] = useState(false);
   const [verificationCode, setVerificationCode] = useState("");
+  const [codexManualAction, setCodexManualAction] =
+    useState<CodexManualActionPayload | null>(null);
+  const [manualActionLoading, setManualActionLoading] = useState(false);
   const [currentTaskId, setCurrentTaskId] = useState<string | null>(null); // 当前需要验证码的任务ID
   const [currentTaskEmail, setCurrentTaskEmail] = useState<string | null>(null); // 当前需要验证码的任务邮箱
   const [realtimeOutput, setRealtimeOutput] = useState<string[]>([]);
@@ -255,8 +284,11 @@ export const AutoRegisterPage: React.FC = () => {
   const realtimeOutputRef = useRef<string[]>([]);
   const batchCountRef = useRef(1);
   const isBatchRegisteringRef = useRef(false);
+  const batchProgressEntriesRef = useRef<Map<number, string>>(new Map());
   const cancelledStopTaskIdsRef = useRef<Set<string>>(new Set());
   const registrationRunIdRef = useRef(0);
+  const currentTaskIdRef = useRef<string | null>(null);
+  const currentTaskEmailRef = useRef<string | null>(null);
   const [showBankCardConfig, setShowBankCardConfig] = useState(false);
   const [bankCardConfig, setBankCardConfig] = useState<BankCardConfig | null>(
     null
@@ -273,6 +305,9 @@ export const AutoRegisterPage: React.FC = () => {
 
   // 批量注册相关状态
   const [batchCount, setBatchCount] = useState(1);
+  const [batchSerialDelaySeconds, setBatchSerialDelaySeconds] = useState(
+    DEFAULT_BATCH_SERIAL_DELAY_SECONDS
+  );
   const [batchEmails, setBatchEmails] = useState<string[]>([""]);
   const [useParallelMode, setUseParallelMode] = useState(true); // 并行模式开关，默认开启
 
@@ -291,6 +326,63 @@ export const AutoRegisterPage: React.FC = () => {
   useEffect(() => {
     batchCountRef.current = batchCount;
   }, [batchCount]);
+
+  useEffect(() => {
+    currentTaskIdRef.current = currentTaskId;
+  }, [currentTaskId]);
+
+  useEffect(() => {
+    currentTaskEmailRef.current = currentTaskEmail;
+  }, [currentTaskEmail]);
+
+  const showCodexManualStepPrompt = (
+    payload: Partial<CodexManualActionPayload> = {}
+  ) => {
+    const fileTaskId =
+      payload.continue_file || payload.cancel_file
+        ? resolveCodexManualTaskId(payload as CodexManualActionPayload)
+        : null;
+    const taskId =
+      payload.task_id !== undefined
+        ? payload.task_id
+        : fileTaskId || currentTaskIdRef.current;
+    const email =
+      payload.email !== undefined ? payload.email : currentTaskEmailRef.current;
+
+    if (taskId) {
+      setCurrentTaskId(taskId);
+    }
+    if (email) {
+      setCurrentTaskEmail(email);
+    }
+
+    setCodexManualAction({
+      task_id: taskId ?? null,
+      email: email ?? null,
+      reason:
+        payload.reason || "codex_manual_confirm_registration_complete",
+      message:
+        payload.message ||
+        "当前已经到 Step1 自动执行前的节点。如果自动注册没成功，请先在浏览器里手动完成注册，然后点击“手动确认注册完成并执行 Step1”；如果你确认这一步可以跳过，也可以直接继续。",
+      status: payload.status || "waiting",
+      continue_file: payload.continue_file ?? null,
+      cancel_file: payload.cancel_file ?? null,
+    });
+  };
+
+  const resolveCodexManualTaskId = (
+    payload: CodexManualActionPayload | null
+  ): string | null => {
+    if (payload?.task_id?.trim()) {
+      return payload.task_id.trim();
+    }
+
+    const filePath = payload?.continue_file || payload?.cancel_file || "";
+    const match = filePath.match(
+      /(?:cdp_flow_continue_|cursor_registration_stop_)([^\\\/\s.]+)\.txt/i
+    );
+    return match?.[1]?.trim() || null;
+  };
 
   useEffect(() => {
     if (showVerificationModal) {
@@ -353,6 +445,34 @@ export const AutoRegisterPage: React.FC = () => {
         async (event: any) => {
           console.log("收到实时输出事件:", event.payload);
           const data = event.payload;
+          if (typeof data.line === "string" && data.line.trim().startsWith("{")) {
+            try {
+              const eventPayload = JSON.parse(data.line);
+              if (
+                eventPayload?.action === "wait_for_user" &&
+                eventPayload?.reason ===
+                  "codex_manual_confirm_registration_complete"
+              ) {
+                showCodexManualStepPrompt({
+                  task_id: currentTaskIdRef.current,
+                  email: currentTaskEmailRef.current,
+                  reason: eventPayload.reason,
+                  continue_file: eventPayload.continue_file,
+                  cancel_file: eventPayload.cancel_file,
+                  message:
+                    eventPayload.message ||
+                    "已到 Step1 自动执行前的节点。若你已手动完成注册，可点击“手动确认注册完成”继续下一步。",
+                  status: eventPayload.status,
+                });
+                setToast({
+                  message: "已到 Step1 前暂停点，可手动确认后继续下一步",
+                  type: "info",
+                });
+              }
+            } catch {
+              // Ignore non-JSON log lines
+            }
+          }
           if (data.line.includes("wuqi666")) {
             const wuqi: any = JSON.parse(data.line);
 
@@ -597,6 +717,40 @@ export const AutoRegisterPage: React.FC = () => {
 
       console.log("事件监听器设置完成");
 
+      const unlistenBatchProgress = await listen(
+        "batch-registration-progress",
+        (event: any) => {
+          if (!isBatchRegisteringRef.current) {
+            return;
+          }
+          updateBatchRegistrationProgress(
+            (event.payload || {}) as BatchProgressEventPayload
+          );
+        }
+      );
+
+      const unlistenCodexManualStep = await listen(
+        "codex-manual-step-required",
+        (event: any) => {
+          if (!isRegisteringRef.current) {
+            return;
+          }
+          const payload = (event.payload || {}) as CodexManualActionPayload;
+          if (
+            payload.reason !== "codex_manual_confirm_registration_complete"
+          ) {
+            return;
+          }
+          showCodexManualStepPrompt(payload);
+          setToast({
+            message:
+              payload.message ||
+              "已到 Step1 自动执行前的节点，可手动确认后继续下一步",
+            type: "info",
+          });
+        }
+      );
+
       return () => {
         unlistenOutput();
         unlistenVerification();
@@ -604,6 +758,8 @@ export const AutoRegisterPage: React.FC = () => {
         unlistenCodeFailed();
         unlistenManualInput();
         unlistenVerificationTimeout();
+        unlistenBatchProgress();
+        unlistenCodexManualStep();
       };
     };
 
@@ -800,11 +956,108 @@ export const AutoRegisterPage: React.FC = () => {
     setIsLoading(false);
     setIsRegistering(false);
     isBatchRegisteringRef.current = false;
+    batchProgressEntriesRef.current.clear();
     cancelledStopTaskIdsRef.current.clear();
     setShowVerificationModal(false);
+    setCodexManualAction(null);
+    setManualActionLoading(false);
     setVerificationCode("");
     setCurrentTaskId(null);
     setCurrentTaskEmail(null);
+  };
+
+  const updateBatchRegistrationProgress = (payload: BatchProgressEventPayload) => {
+    const total = payload.total ?? batchCountRef.current;
+    const completed = payload.completed ?? 0;
+    const succeeded = payload.succeeded ?? 0;
+    const failed = payload.failed ?? 0;
+    const index = payload.index ?? 0;
+    const email = payload.email || `任务 ${index + 1}`;
+    const detail = payload.success
+      ? `✅[${index + 1}] ${email}: 成功`
+      : `❌[${index + 1}] ${email}: ${payload.error || "失败"}`;
+
+    batchProgressEntriesRef.current.set(index, detail);
+    const details = Array.from(batchProgressEntriesRef.current.entries())
+      .sort((a, b) => a[0] - b[0])
+      .map(([, value]) => value);
+
+    setRegistrationResult({
+      success: failed === 0 || completed < total,
+      message:
+        completed >= total
+          ? `批量注册完成：${succeeded}/${total} 成功`
+          : `批量注册进行中：${completed}/${total} 已完成`,
+      details,
+    });
+  };
+
+  const handleCodexManualStepAction = async (
+    action: "manual_confirm_complete" | "continue"
+  ) => {
+    const taskId = resolveCodexManualTaskId(codexManualAction);
+    if (!taskId) {
+      setToast({ message: "当前任务信息缺失，无法继续", type: "error" });
+      return;
+    }
+
+    try {
+      setManualActionLoading(true);
+      await invoke("signal_registration_continue", {
+        taskId,
+        action,
+      });
+      setCodexManualAction(null);
+      if (currentTaskIdRef.current === taskId) {
+        setCurrentTaskId(null);
+        setCurrentTaskEmail(null);
+      }
+      setToast({
+        message:
+          action === "manual_confirm_complete"
+            ? "已发送手动确认完成信号，继续执行当前任务"
+            : "已发送继续执行信号",
+        type: "success",
+      });
+    } catch (error) {
+      setToast({ message: `发送继续信号失败: ${error}`, type: "error" });
+    } finally {
+      setManualActionLoading(false);
+    }
+  };
+
+  const handleCodexManualStepForceClose = async () => {
+    const taskId = resolveCodexManualTaskId(codexManualAction);
+
+    try {
+      setManualActionLoading(true);
+      if (taskId) {
+        await invoke("cancel_registration_task", {
+          taskId,
+        });
+      } else {
+        await invoke("cancel_registration");
+      }
+
+      setCodexManualAction(null);
+      if (taskId && currentTaskIdRef.current === taskId) {
+        setCurrentTaskId(null);
+        setCurrentTaskEmail(null);
+      }
+      setToast({
+        message: taskId
+          ? "已强制关闭当前任务，当前账号会按失败处理。"
+          : "已停止当前注册流程。",
+        type: "info",
+      });
+    } catch (error) {
+      setToast({
+        message: `强制关闭当前任务失败: ${error}`,
+        type: "error",
+      });
+    } finally {
+      setManualActionLoading(false);
+    }
   };
 
   const handleVerificationCodeSubmit = async () => {
@@ -1128,6 +1381,7 @@ export const AutoRegisterPage: React.FC = () => {
 
     setIsLoading(true);
     setIsRegistering(true);
+    batchProgressEntriesRef.current.clear();
     setRegistrationResult(null);
     cancelledStopTaskIdsRef.current.clear();
     realtimeOutputRef.current = []; // 清空ref
@@ -1593,6 +1847,11 @@ export const AutoRegisterPage: React.FC = () => {
     cancelledStopTaskIdsRef.current.clear();
     realtimeOutputRef.current = [];
     setRealtimeOutput([]);
+    setRegistrationResult({
+      success: true,
+      message: `批量注册进行中：0/${batchCount} 已完成`,
+      details: [],
+    });
     setToast({
       message: `开始批量注册 ${batchCount} 个账户（${
         useParallelMode ? "并行" : "串行"
@@ -1614,6 +1873,14 @@ export const AutoRegisterPage: React.FC = () => {
         emails,
         firstNames,
         lastNames,
+        ...(!useParallelMode
+          ? {
+              batchDelaySeconds: Math.max(
+                0,
+                Math.floor(batchSerialDelaySeconds)
+              ),
+            }
+          : {}),
         emailType,
         outlookMode: emailType === "outlook" ? outlookMode : undefined,
         tempmailEmail: emailType === "tempmail" ? tempmailEmail : undefined,
@@ -1654,6 +1921,7 @@ export const AutoRegisterPage: React.FC = () => {
                 socks_proxy: proxyType === "socks" ? socksProxy : "",
                 no_proxy: noProxy,
               },
+              manualConfirmBeforePostOauth: true,
               codexCdpOverrides,
             }
           : {
@@ -1926,6 +2194,13 @@ export const AutoRegisterPage: React.FC = () => {
     const cachedUseParallelMode = getUseParallelMode();
     if (cachedUseParallelMode !== null) {
       setUseParallelMode(cachedUseParallelMode);
+    }
+
+    const cachedBatchSerialDelaySeconds = getBatchSerialDelaySeconds();
+    if (cachedBatchSerialDelaySeconds !== null) {
+      setBatchSerialDelaySeconds(
+        Math.max(0, Math.floor(cachedBatchSerialDelaySeconds))
+      );
     }
 
     const cursorUrl = getSelfHostedMailUrl();
@@ -3415,6 +3690,34 @@ export const AutoRegisterPage: React.FC = () => {
                       <br />
                       💡 并行模式：每个账户独立窗口，同时注册，速度更快
                     </p>
+                    {!useParallelMode && (
+                      <div className="mt-3">
+                        <label className="text-subtle mb-1 block text-sm">
+                          串行间隔秒数
+                        </label>
+                        <input
+                          type="number"
+                          min="0"
+                          max="600"
+                          step="1"
+                          value={batchSerialDelaySeconds}
+                          onChange={(e) => {
+                            const rawValue = parseInt(e.target.value, 10);
+                            const nextValue = Number.isNaN(rawValue)
+                              ? DEFAULT_BATCH_SERIAL_DELAY_SECONDS
+                              : Math.max(0, Math.min(rawValue, 600));
+                            setBatchSerialDelaySeconds(nextValue);
+                            setCachedBatchSerialDelaySeconds(nextValue);
+                          }}
+                          className="field-input"
+                          placeholder="输入下一个任务前等待的秒数"
+                          disabled={isLoading}
+                        />
+                        <p className="text-muted mt-1 text-xs">
+                          第 1 个任务立即开始，第 2 个起每次都会等待这里设置的秒数后再打开执行。
+                        </p>
+                      </div>
+                    )}
                   </div>
                   <div className="flex-shrink-0 pt-6">
                     <div className="flex items-center gap-2">
@@ -3547,6 +3850,46 @@ export const AutoRegisterPage: React.FC = () => {
             </div>
 
             {/* 注册结果 */}
+            {codexManualAction && !showVerificationModal && (
+              <div className="rounded-md border border-amber-300 bg-amber-50/95 p-4 shadow-sm dark:border-amber-500/40 dark:bg-amber-500/10">
+                <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                  <div className="space-y-2">
+                    <h4 className="text-sm font-semibold text-amber-900 dark:text-amber-100">
+                      Codex 已暂停在 Step1 自动执行前
+                    </h4>
+                    <p className="text-sm text-amber-800 dark:text-amber-100/90">
+                      {codexManualAction.message ||
+                        "如果自动注册没有成功，请先在当前浏览器里手动完成注册，然后点击“手动确认注册完成并执行 Step1”。"}
+                    </p>
+                    <div className="flex flex-wrap gap-3 text-xs text-amber-900/80 dark:text-amber-100/80">
+                      {codexManualAction.email && (
+                        <span className="rounded-full bg-white/70 px-3 py-1 font-mono dark:bg-slate-900/40">
+                          邮箱: {codexManualAction.email}
+                        </span>
+                      )}
+                      {codexManualAction.task_id && (
+                        <span className="rounded-full bg-white/70 px-3 py-1 font-mono dark:bg-slate-900/40">
+                          Task ID: {codexManualAction.task_id}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-3">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        handleCodexManualStepAction("manual_confirm_complete")
+                      }
+                      disabled={manualActionLoading}
+                      className="rounded-md border border-emerald-500 bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      手动触发 Step1
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {registrationResult && (
               <div
                 className={`rounded-md p-4 ${
@@ -3724,6 +4067,66 @@ export const AutoRegisterPage: React.FC = () => {
       )}
 
       {/* 邮箱配置模态框 */}
+      {false && codexManualAction && !showVerificationModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50">
+          <div className="panel-floating mx-4 w-[30rem] max-w-xl rounded-lg p-6">
+            <h3 className="mb-4 text-lg font-medium text-slate-900 dark:text-slate-100">
+              Codex 手动确认步骤
+            </h3>
+            <div className="status-info mb-4 rounded-md px-3 py-2">
+              {codexManualAction?.email && (
+                <p className="text-sm text-blue-800">
+                  📧 任务邮箱:{" "}
+                  <span className="font-mono font-medium">
+                    {codexManualAction?.email}
+                  </span>
+                </p>
+              )}
+              {codexManualAction?.task_id && (
+                <p className="mt-1 text-xs text-blue-600">
+                  🆔 任务ID:{" "}
+                  <span className="font-mono">
+                    {codexManualAction?.task_id}
+                  </span>
+                </p>
+              )}
+            </div>
+            <p className="text-subtle mb-4 text-sm">
+              {codexManualAction?.message ||
+                "当前任务需要手动确认后再继续执行。"}
+            </p>
+            <div className="flex flex-wrap justify-end gap-3">
+              {/* <button
+                type="button"
+                onClick={() => handleCodexManualStepAction("continue")}
+                disabled={manualActionLoading}
+                className="surface-secondary border-subtle rounded-md border px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-200/80 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-500 disabled:cursor-not-allowed disabled:opacity-50 dark:text-slate-300 dark:hover:bg-slate-700/70"
+              >
+                继续执行
+              </button> */}
+              <button
+                type="button"
+                onClick={handleCodexManualStepForceClose}
+                disabled={manualActionLoading}
+                className="rounded-md border border-red-500 bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                强制关闭当前任务
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  handleCodexManualStepAction("manual_confirm_complete")
+                }
+                disabled={manualActionLoading}
+                className="rounded-md border border-emerald-500 bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                手动确认注册完成
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <EmailConfigModal
         isOpen={showEmailConfig}
         onClose={() => setShowEmailConfig(false)}

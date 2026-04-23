@@ -1394,7 +1394,17 @@ export const AccountList: React.FC<AccountListProps> = ({
                   className="surface-elevated rounded border p-2"
                 >
                   <div className="flex items-center justify-between gap-2">
-                    <span className="text-xs text-slate-800 dark:text-slate-100">{item.file_name}</span>
+                    <div className="min-w-0">
+                      <span className="block truncate text-xs text-slate-800 dark:text-slate-100">
+                        {item.file_name}
+                      </span>
+                      <span className="block text-[11px] text-slate-500 dark:text-slate-400">
+                        创建时间：
+                        {item.created_at_unix > 0
+                          ? formatDate(new Date(item.created_at_unix * 1000).toISOString())
+                          : "未知"}
+                      </span>
+                    </div>
                     <div className="flex items-center gap-2">
                       <button
                         type="button"

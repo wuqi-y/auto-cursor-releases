@@ -57,19 +57,32 @@ BIRTHDAY_INPUT_TOKEN = "__BIRTHDAY_2002_03_12__"
 
 
 def _read_verification_code_from_file(
+    page: Any = None,
     timeout_s: float = 180.0,
     poll_interval_s: float = 1.0,
     request_reemit_interval_s: float = 8.0,
 ) -> str:
     code_file = os.environ.get("CURSOR_VERIFICATION_CODE_FILE", "").strip()
+    cancel_file = (
+        os.environ.get("CDP_FLOW_CANCEL_FILE", "").strip()
+        or os.environ.get("CURSOR_REGISTRATION_STOP_FILE", "").strip()
+    )
     if not code_file:
         _safe_print("request_verification_code")
         return ""
 
     _safe_print("request_verification_code")
     end_at = time.time() + max(0.0, timeout_s)
+    resend_schedule_s = [30.0, 60.0]
+    resend_index = 0
+    started_at = time.time()
     next_reemit_at = time.time() + max(2.0, request_reemit_interval_s)
-    while time.time() < end_at:
+    manual_input_announced = False
+    next_manual_reemit_at = 0.0
+    while True:
+        if cancel_file and os.path.exists(cancel_file):
+            _safe_print("verification_cancelled")
+            return ""
         if os.path.exists(code_file):
             try:
                 with open(code_file, "r", encoding="utf-8") as f:
@@ -84,13 +97,41 @@ def _read_verification_code_from_file(
                 return code
         # 低频重发请求，避免消息桥偶发丢失导致第二次验证码流程“无响应”。
         now = time.time()
+        if page is not None and resend_index < len(resend_schedule_s):
+            resend_after_s = resend_schedule_s[resend_index]
+            if now - started_at >= resend_after_s:
+                resend_selectors = [
+                    "css:button[name='intent'][value='resend']",
+                    "xpath://button[@name='intent' and @value='resend']",
+                    "xpath://button[@name='intent' and contains(normalize-space(.), '重新发送电子邮件')]",
+                    "xpath://*[@name='intent' and @value='resend']",
+                ]
+                resend_ok = False
+                for resend_sel in resend_selectors:
+                    if _try_click(page, resend_sel, timeout_s=8.0):
+                        resend_ok = True
+                        _safe_print(
+                            f"{Fore.CYAN}🖱️ 验证码等待超时 {int(resend_after_s)} 秒，已触发重发按钮 {resend_sel!r}{Style.RESET_ALL}"
+                        )
+                        _wait_page_loaded(page, timeout_s=15.0)
+                        time.sleep(1.5)
+                        break
+                if not resend_ok:
+                    _safe_print(
+                        f"{Fore.YELLOW}⚠️ 验证码等待超时 {int(resend_after_s)} 秒，但未找到重发按钮 name='intent' value='resend'{Style.RESET_ALL}"
+                    )
+                resend_index += 1
+        if not manual_input_announced and now >= end_at:
+            _safe_print("manual_input_required")
+            manual_input_announced = True
+            next_manual_reemit_at = now + max(8.0, request_reemit_interval_s)
         if now >= next_reemit_at:
             _safe_print("request_verification_code")
             next_reemit_at = now + max(2.0, request_reemit_interval_s)
+        if manual_input_announced and now >= next_manual_reemit_at:
+            _safe_print("manual_input_required")
+            next_manual_reemit_at = now + max(8.0, request_reemit_interval_s)
         time.sleep(poll_interval_s)
-
-    _safe_print("manual_input_required")
-    return ""
 
 
 def _mail_poll_debug() -> bool:
@@ -480,7 +521,7 @@ def _wait_for_continue(
 
     while True:
         if cancel_file and os.path.exists(cancel_file):
-            return False
+            return "cancel"
 
         if continue_file and os.path.exists(continue_file):
             try:
@@ -495,8 +536,8 @@ def _wait_for_continue(
                 pass
 
             if content == "cancel":
-                return False
-            return True
+                return "cancel"
+            return content or "continue"
 
         time.sleep(poll_interval_s)
 
@@ -736,19 +777,19 @@ def _run_oauth_step2_with_callback(final_url: str) -> None:
         _safe_print(f"{Fore.YELLOW}⚠️ OAuth Step2 换取 Token 失败: {e}{Style.RESET_ALL}")
 
 
-def _run_post_oauth_step1_in_same_browser(page: Any, register_email_hint: str) -> None:
+def _run_post_oauth_step1_in_same_browser(page: Any, register_email_hint: str) -> bool:
     """在当前浏览器中直接打开 OpenAI OAuth 授权 URL，并复用同一邮箱+自动验证码。"""
     try:
         from openai_oauth_step1 import generate_oauth_url  # type: ignore
     except Exception as e:
         _safe_print(f"{Fore.YELLOW}⚠️ 无法导入 openai_oauth_step1.generate_oauth_url: {e}{Style.RESET_ALL}")
-        return
+        return False
 
     try:
         oauth = generate_oauth_url()
     except Exception as e:
         _safe_print(f"{Fore.YELLOW}⚠️ 生成 OAuth URL 失败: {e}{Style.RESET_ALL}")
-        return
+        return False
 
     # 等待上一流程页面加载完毕后再额外等待 2 秒，再打开 OAuth 页面
     _wait_page_loaded(page, timeout_s=30.0)
@@ -788,7 +829,7 @@ def _run_post_oauth_step1_in_same_browser(page: Any, register_email_hint: str) -
             page.get(auth_url)
         except Exception as e:
             _safe_print(f"{Fore.YELLOW}⚠️ 打开 OAuth URL 失败: {e}{Style.RESET_ALL}")
-            return
+            return False
 
     try:
         # 若 new_tab 返回了新的页面对象，则使用它
@@ -801,7 +842,7 @@ def _run_post_oauth_step1_in_same_browser(page: Any, register_email_hint: str) -
     email = (register_email_hint or "").strip()
     if not email:
         _safe_print(f"{Fore.YELLOW}⚠️ OAuth Step1: 未检测到注册邮箱，跳过自动填写{Style.RESET_ALL}")
-        return
+        return False
 
     _safe_print(f"{Fore.CYAN}📧 OAuth Step1 使用邮箱: {email}{Style.RESET_ALL}")
 
@@ -828,12 +869,12 @@ def _run_post_oauth_step1_in_same_browser(page: Any, register_email_hint: str) -
         _safe_print(
             f"{Fore.RED}❌ OAuth Step1: 所有候选邮箱输入框 selector 均未命中，放弃后续自动步骤{Style.RESET_ALL}"
         )
-        return
+        return False
 
     # 2) 先点 submit（Continue / 下一步），再点 intent（页面顺序如此）
     if not _try_click(new_page, "css:button[type='submit']", timeout_s=20.0):
         _safe_print(f"{Fore.YELLOW}⚠️ OAuth Step1: 首次未找到提交按钮 css:button[type='submit']{Style.RESET_ALL}")
-        return
+        return False
     _safe_print(f"{Fore.CYAN}🖱️ OAuth Step1 首次 click 'css:button[type=\"submit\"]': OK{Style.RESET_ALL}")
     _wait_page_loaded(new_page, timeout_s=30.0)
     time.sleep(2.0)
@@ -862,17 +903,17 @@ def _run_post_oauth_step1_in_same_browser(page: Any, register_email_hint: str) -
     # 4) 再点 submit（发送验证码或进入 OTP 页）
     if not _try_click(new_page, "css:button[type='submit']", timeout_s=20.0):
         _safe_print(f"{Fore.YELLOW}⚠️ OAuth Step1: 第二次未找到提交按钮 css:button[type='submit']{Style.RESET_ALL}")
-        return
+        return False
     _safe_print(f"{Fore.CYAN}🖱️ OAuth Step1 第二次 click 'css:button[type=\"submit\"]': OK{Style.RESET_ALL}")
     _wait_page_loaded(new_page, timeout_s=30.0)
     time.sleep(2.0)
 
     # 5) 自动获取验证码并填入
     _safe_print(f"{Fore.CYAN}📨 OAuth Step1: 开始自动获取验证码{Style.RESET_ALL}")
-    code = _read_verification_code_from_file() if os.environ.get("CURSOR_VERIFICATION_CODE_FILE") else get_oai_code(email)
+    code = _read_verification_code_from_file(new_page) if os.environ.get("CURSOR_VERIFICATION_CODE_FILE") else get_oai_code(email)
     if not code:
         _safe_print(f"{Fore.RED}❌ OAuth Step1: 自动获取验证码失败{Style.RESET_ALL}")
-        return
+        return False
 
     # 优先 @name=otp，失败回退 @name=code（与主流程保持一致）
     ok = _try_input(new_page, "@name=otp", code, timeout_s=20.0)
@@ -886,7 +927,7 @@ def _run_post_oauth_step1_in_same_browser(page: Any, register_email_hint: str) -
 
     if not ok:
         _safe_print(f"{Fore.RED}❌ OAuth Step1: 验证码输入失败{Style.RESET_ALL}")
-        return
+        return False
 
     # 6) 连续两次点击提交：每次点击后等待页面加载完毕，再额外等待 2 秒
     for i in range(2):
@@ -935,6 +976,10 @@ def _run_post_oauth_step1_in_same_browser(page: Any, register_email_hint: str) -
 
     if final_url and _is_oauth_callback_url(final_url, redirect_uri):
         _run_oauth_step2_with_callback(final_url)
+        return True
+
+    _safe_print(f"{Fore.YELLOW}⚠️ OAuth Step1: 未能到达回调 URL，后续可在前端手动重试 Step1{Style.RESET_ALL}")
+    return False
 
 
 def run_flow(
@@ -1039,7 +1084,7 @@ def run_flow(
                 )
                 if should_auto_fetch_code:
                     _safe_print(f"{Fore.CYAN}📨 触发自动获取验证码: {sel!r}{Style.RESET_ALL}")
-                    code = _read_verification_code_from_file() if os.environ.get("CURSOR_VERIFICATION_CODE_FILE") else get_oai_code(register_email_hint)
+                    code = _read_verification_code_from_file(page) if os.environ.get("CURSOR_VERIFICATION_CODE_FILE") else get_oai_code(register_email_hint)
                     if not code:
                         _safe_print(
                             f"{Fore.RED}❌ 自动获取验证码失败，请检查测试邮箱接口配置{Style.RESET_ALL}"
@@ -1068,8 +1113,25 @@ def run_flow(
 
             _safe_print(f"{Fore.YELLOW}⚠️ 未知 step 类型: {kind!r}{Style.RESET_ALL}")
 
+        manual_confirm_before_post_oauth = os.environ.get(
+            "CDP_FLOW_REQUIRE_MANUAL_CONFIRM_BEFORE_POST_OAUTH", "0"
+        ).strip().lower() in ("1", "true", "yes", "y")
         if post_oauth_step1_py:
-            _run_post_oauth_step1_in_same_browser(browser_page, register_email_hint)
+            auto_step1_ok = _run_post_oauth_step1_in_same_browser(browser_page, register_email_hint)
+            if manual_confirm_before_post_oauth and not auto_step1_ok:
+                action = _wait_for_continue(
+                    reason="codex_manual_confirm_registration_complete",
+                    prompt="Step1 自动执行失败。请先在浏览器中手动完成注册，然后点击前端“手动触发 Step1”重试。",
+                )
+                if action == "cancel":
+                    _emit_event({"action": "cancelled", "status": "cancelled"})
+                    return 2
+                if action in (
+                    "manual_confirm_complete",
+                    "run_post_oauth_step1",
+                    "post_oauth_step1",
+                ):
+                    _run_post_oauth_step1_in_same_browser(browser_page, register_email_hint)
 
         # 默认不阻塞等待 continue_file：输出提示后即可结束流程，避免长时间挂起。
         # 如需保留旧行为，可设置 CDP_FLOW_REQUIRE_CONTINUE=true。
@@ -1081,7 +1143,7 @@ def run_flow(
         )
         if require_continue:
             cont = _wait_for_continue(reason=pause_reason, prompt=pause_prompt)
-            if not cont:
+            if cont == "cancel":
                 _emit_event({"action": "cancelled", "status": "cancelled"})
                 return 2
         else:

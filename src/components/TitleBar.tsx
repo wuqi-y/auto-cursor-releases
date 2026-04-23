@@ -72,10 +72,10 @@ export function TitleBar() {
   );
 
   return (
-    <div className="titlebar">
+    <div className="titlebar" >
       <div className="titlebar-inner" data-tauri-drag-region>
-        <div className="titlebar-left">
-          <div className="titlebar-appname">
+        <div className="titlebar-left" >
+          <div className="titlebar-appname" data-tauri-drag-region>
             Auto Cursor
           </div>
         </div>

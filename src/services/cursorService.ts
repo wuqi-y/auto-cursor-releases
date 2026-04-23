@@ -4,6 +4,7 @@ import { AuthCheckResult, TokenInfo, BackupInfo, MachineIds, RestoreResult, Rese
 export interface CodexTokenFileInfo {
   file_name: string;
   file_path: string;
+  created_at_unix: number;
   updated_at_unix: number;
   content: string;
 }
