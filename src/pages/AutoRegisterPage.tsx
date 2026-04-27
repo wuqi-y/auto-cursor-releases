@@ -171,11 +171,17 @@ export const AutoRegisterPage: React.FC = () => {
     proxyType,
     httpProxy,
     socksProxy,
+    vlessUrl,
+    xrayHttpPort,
+    xraySocksPort,
     noProxy,
     setEnabled: setProxyEnabled,
     setProxyType,
     setHttpProxy,
     setSocksProxy,
+    setVlessUrl,
+    setXrayHttpPort,
+    setXraySocksPort,
     setNoProxy,
     resetToDefaults: resetProxyConfig,
     getProxyConfig,
@@ -237,6 +243,20 @@ export const AutoRegisterPage: React.FC = () => {
   const [allowTrial, setAllowTrial] = useState(true);
   const [useApiForBindCard, setUseApiForBindCard] = useState<1 | 2>(1); // 1为使用接口，2为不使用接口（模拟点击）
   const [isLoading, setIsLoading] = useState(false);
+  const [isTestingVlessProxy, setIsTestingVlessProxy] = useState(false);
+  const [vlessRuntimeProxy, setVlessRuntimeProxy] = useState<{
+    httpProxy: string;
+    socksProxy: string;
+    httpPort: number;
+    socksPort: number;
+  } | null>(null);
+  const [vlessDownloadProgress, setVlessDownloadProgress] = useState<{
+    stage: string;
+    message: string;
+    percent: number | null;
+    receivedBytes: number;
+    totalBytes: number | null;
+  } | null>(null);
   const [toast, setToast] = useState<{
     message: string;
     type: "success" | "error" | "info";
@@ -620,6 +640,32 @@ export const AutoRegisterPage: React.FC = () => {
       }
     };
   }, []); // 确保只运行一次
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    const setup = async () => {
+      unlisten = await listen("vless-xray-download-progress", (event: any) => {
+        const payload = event.payload || {};
+        setVlessDownloadProgress({
+          stage: payload.stage || "downloading",
+          message: payload.message || "正在下载 xray...",
+          percent:
+            typeof payload.percent === "number" && Number.isFinite(payload.percent)
+              ? payload.percent
+              : null,
+          receivedBytes:
+            typeof payload.receivedBytes === "number" ? payload.receivedBytes : 0,
+          totalBytes: typeof payload.totalBytes === "number" ? payload.totalBytes : null,
+        });
+      });
+    };
+    setup();
+    return () => {
+      if (unlisten) {
+        unlisten();
+      }
+    };
+  }, []);
 
   // 加载银行卡列表
   useEffect(() => {
@@ -1070,6 +1116,145 @@ export const AutoRegisterPage: React.FC = () => {
     return true;
   };
 
+  const buildRuntimeProxyConfig = async () => {
+    const currentProxy = getProxyConfig() as any;
+    if (!currentProxy.enabled || currentProxy.proxy_type !== "vless") {
+      await invoke("stop_vless_proxy").catch(() => {});
+      return currentProxy;
+    }
+
+    if (!currentProxy.vless_url?.trim()) {
+      throw new Error("VLESS 模式下请先填写 vless 链接");
+    }
+
+    const normalizedHttpPort =
+      Number.isInteger(Number(currentProxy.xray_http_port)) &&
+      Number(currentProxy.xray_http_port) >= 1 &&
+      Number(currentProxy.xray_http_port) <= 65535
+        ? Number(currentProxy.xray_http_port)
+        : 8991;
+    const normalizedSocksPort =
+      Number.isInteger(Number(currentProxy.xray_socks_port)) &&
+      Number(currentProxy.xray_socks_port) >= 1 &&
+      Number(currentProxy.xray_socks_port) <= 65535
+        ? Number(currentProxy.xray_socks_port)
+        : 1990;
+
+    const runtime = await invoke<{
+      httpProxy: string;
+      socksProxy: string;
+      httpPort: number;
+      socksPort: number;
+    }>("start_vless_proxy", {
+      vlessUrl: currentProxy.vless_url.trim(),
+      httpPort: normalizedHttpPort,
+      socksPort: normalizedSocksPort,
+    });
+
+    return {
+      ...currentProxy,
+      proxy_type: "http",
+      http_proxy: runtime.httpProxy,
+      socks_proxy: runtime.socksProxy,
+    };
+  };
+
+  const testAndStartVlessProxy = async () => {
+    if (proxyType !== "vless") {
+      setToast({ message: "请先选择 VLESS 代理类型", type: "error" });
+      return;
+    }
+    if (!vlessUrl.trim()) {
+      setToast({ message: "请填写 VLESS 标准链接", type: "error" });
+      return;
+    }
+
+    setIsTestingVlessProxy(true);
+    setVlessDownloadProgress({
+      stage: "prepare",
+      message: "准备启动 VLESS 代理...",
+      percent: null,
+      receivedBytes: 0,
+      totalBytes: null,
+    });
+    try {
+      const runtime = await invoke<{
+        httpProxy: string;
+        socksProxy: string;
+        httpPort: number;
+        socksPort: number;
+      }>("start_vless_proxy", {
+        vlessUrl: vlessUrl.trim(),
+        httpPort:
+          Number.isInteger(Number(xrayHttpPort)) && xrayHttpPort >= 1 && xrayHttpPort <= 65535
+            ? xrayHttpPort
+            : 8991,
+        socksPort:
+          Number.isInteger(Number(xraySocksPort)) && xraySocksPort >= 1 && xraySocksPort <= 65535
+            ? xraySocksPort
+            : 1990,
+      });
+      setVlessRuntimeProxy(runtime);
+      setToast({
+        message: `VLESS 启动成功：HTTP ${runtime.httpProxy} / SOCKS ${runtime.socksProxy}`,
+        type: "success",
+      });
+      setVlessDownloadProgress((prev) =>
+        prev
+          ? {
+              ...prev,
+              stage: "completed",
+              message: "VLESS 启动完成",
+              percent: prev.percent ?? 100,
+            }
+          : null
+      );
+    } catch (error) {
+      setVlessRuntimeProxy(null);
+      const errorText = String(error);
+      if (errorText.includes("用户已取消 xray 下载")) {
+        setToast({ message: "已取消 xray 下载", type: "info" });
+      } else {
+        setToast({ message: `VLESS 启动失败: ${error}`, type: "error" });
+      }
+    } finally {
+      setIsTestingVlessProxy(false);
+    }
+  };
+
+  const cancelVlessDownload = async () => {
+    try {
+      await invoke("cancel_vless_xray_download");
+      setVlessDownloadProgress((prev) =>
+        prev
+          ? {
+              ...prev,
+              stage: "cancelled",
+              message: "已取消下载，正在停止任务...",
+            }
+          : {
+              stage: "cancelled",
+              message: "已取消下载",
+              percent: null,
+              receivedBytes: 0,
+              totalBytes: null,
+            }
+      );
+      setToast({ message: "已取消 xray 下载", type: "info" });
+    } catch (error) {
+      setToast({ message: `取消下载失败: ${error}`, type: "error" });
+    }
+  };
+
+  const copyText = async (text: string, label: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setToast({ message: `${label}已复制: ${text}`, type: "success" });
+    } catch (error) {
+      setToast({ message: `复制失败: ${error}`, type: "error" });
+    }
+  };
+
   const handleRegister = async () => {
     // 🔒 防止重复提交：检查是否已经在注册中
     if (isLoading || isRegistering) {
@@ -1186,7 +1371,7 @@ export const AutoRegisterPage: React.FC = () => {
               btnIndex: isUsAccount ? 1 : 0, // 美国账户使用索引1，否则使用索引0
               cardIndex: enableBankCardBinding ? selectedCardIndex : 0, // 添加卡片索引
               // 代理配置
-              proxy: getProxyConfig(),
+              proxy: await buildRuntimeProxyConfig(),
             },
           }
         );
@@ -1209,7 +1394,7 @@ export const AutoRegisterPage: React.FC = () => {
             useApiForBindCard: useApiForBindCard,
             btnIndex: isUsAccount ? 1 : 0,
             cardIndex: enableBankCardBinding ? selectedCardIndex : 0,
-            proxy: getProxyConfig(),
+            proxy: await buildRuntimeProxyConfig(),
           }
         );
       } else if (
@@ -1224,13 +1409,7 @@ export const AutoRegisterPage: React.FC = () => {
           useApiForBindCard: useApiForBindCard,
           btnIndex: isUsAccount ? 1 : 0,
           cardIndex: enableBankCardBinding ? selectedCardIndex : 0,
-          proxy: {
-            enabled: proxyEnabled,
-            proxy_type: proxyType,
-            http_proxy: proxyType === "http" ? httpProxy : "",
-            socks_proxy: proxyType === "socks" ? socksProxy : "",
-            no_proxy: noProxy,
-          },
+          proxy: await buildRuntimeProxyConfig(),
         };
 
         result = isCodexProvider
@@ -1296,13 +1475,7 @@ export const AutoRegisterPage: React.FC = () => {
             btnIndex: isUsAccount ? 1 : 0, // 美国账户使用索引1，否则使用索引0
             cardIndex: enableBankCardBinding ? selectedCardIndex : 0, // 添加卡片索引
             // 代理配置
-            proxy: {
-              enabled: proxyEnabled,
-              proxy_type: proxyType,
-              http_proxy: proxyType === "http" ? httpProxy : "",
-              socks_proxy: proxyType === "socks" ? socksProxy : "",
-              no_proxy: noProxy,
-            },
+            proxy: await buildRuntimeProxyConfig(),
           },
         });
       } else {
@@ -1326,13 +1499,7 @@ export const AutoRegisterPage: React.FC = () => {
             btnIndex: isUsAccount ? 1 : 0, // 美国账户使用索引1，否则使用索引0
             cardIndex: enableBankCardBinding ? selectedCardIndex : 0, // 添加卡片索引
             // 代理配置
-            proxy: {
-              enabled: proxyEnabled,
-              proxy_type: proxyType,
-              http_proxy: proxyType === "http" ? httpProxy : "",
-              socks_proxy: proxyType === "socks" ? socksProxy : "",
-              no_proxy: noProxy,
-            },
+            proxy: await buildRuntimeProxyConfig(),
           },
         });
       }
@@ -1647,13 +1814,7 @@ export const AutoRegisterPage: React.FC = () => {
             : undefined,
         config: isCodexProvider
           ? {
-              proxy: {
-                enabled: proxyEnabled,
-                proxy_type: proxyType,
-                http_proxy: proxyType === "http" ? httpProxy : "",
-                socks_proxy: proxyType === "socks" ? socksProxy : "",
-                no_proxy: noProxy,
-              },
+              proxy: await buildRuntimeProxyConfig(),
               codexCdpOverrides,
             }
           : {
@@ -1662,13 +1823,7 @@ export const AutoRegisterPage: React.FC = () => {
               allowTrial: allowTrial,
               useApiForBindCard: useApiForBindCard,
               btnIndex: isUsAccount ? 1 : 0,
-              proxy: {
-                enabled: proxyEnabled,
-                proxy_type: proxyType,
-                http_proxy: proxyType === "http" ? httpProxy : "",
-                socks_proxy: proxyType === "socks" ? socksProxy : "",
-                no_proxy: noProxy,
-              },
+              proxy: await buildRuntimeProxyConfig(),
             },
         maxConcurrent: batchCount,
       });
@@ -3011,7 +3166,7 @@ export const AutoRegisterPage: React.FC = () => {
                               value="http"
                               checked={proxyType === "http"}
                               onChange={(e) =>
-                                setProxyType(e.target.value as "http" | "socks")
+                                setProxyType(e.target.value as "http" | "socks" | "vless")
                               }
                               className="w-4 h-4 text-orange-600 border-slate-300 dark:border-slate-700 focus:ring-orange-500"
                             />
@@ -3030,7 +3185,7 @@ export const AutoRegisterPage: React.FC = () => {
                               value="socks"
                               checked={proxyType === "socks"}
                               onChange={(e) =>
-                                setProxyType(e.target.value as "http" | "socks")
+                                setProxyType(e.target.value as "http" | "socks" | "vless")
                               }
                               className="w-4 h-4 text-orange-600 border-slate-300 dark:border-slate-700 focus:ring-orange-500"
                             />
@@ -3039,6 +3194,25 @@ export const AutoRegisterPage: React.FC = () => {
                               className="ml-2 text-sm text-slate-700 dark:text-slate-300"
                             >
                               SOCKS 代理
+                            </label>
+                          </div>
+                          <div className="flex items-center">
+                            <input
+                              id="proxy-vless"
+                              name="proxy-type"
+                              type="radio"
+                              value="vless"
+                              checked={proxyType === "vless"}
+                              onChange={(e) =>
+                                setProxyType(e.target.value as "http" | "socks" | "vless")
+                              }
+                              className="w-4 h-4 text-orange-600 border-slate-300 dark:border-slate-700 focus:ring-orange-500"
+                            />
+                            <label
+                              htmlFor="proxy-vless"
+                              className="ml-2 text-sm text-slate-700 dark:text-slate-300"
+                            >
+                              VLESS（Xray 转 HTTP/SOCKS）
                             </label>
                           </div>
                         </div>
@@ -3087,6 +3261,148 @@ export const AutoRegisterPage: React.FC = () => {
                           <p className="text-muted mt-1 text-xs">
                             格式：IP:端口 或 域名:端口
                           </p>
+                        </div>
+                      )}
+
+                      {proxyType === "vless" && (
+                        <div className="space-y-3">
+                          <div>
+                            <label
+                              htmlFor="vless-url"
+                              className="block text-sm font-medium text-slate-700 dark:text-slate-300"
+                            >
+                              VLESS 标准链接
+                            </label>
+                            <input
+                              type="text"
+                              id="vless-url"
+                              value={vlessUrl}
+                              onChange={(e) => setVlessUrl(e.target.value)}
+                              placeholder="vless://uuid@host:port?security=reality&..."
+                              className="field-input mt-1 focus:ring-orange-500"
+                            />
+                            <p className="text-muted mt-1 text-xs">
+                              自动用 xray 在本地开启 HTTP/SOCKS 代理端口供浏览器使用
+                            </p>
+                          </div>
+
+                          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                            <div>
+                              <label
+                                htmlFor="xray-http-port"
+                                className="block text-sm font-medium text-slate-700 dark:text-slate-300"
+                              >
+                                本地 HTTP 端口
+                              </label>
+                              <input
+                                type="number"
+                                id="xray-http-port"
+                                value={xrayHttpPort}
+                                onChange={(e) =>
+                                  setXrayHttpPort(Number.parseInt(e.target.value || "0", 10))
+                                }
+                                className="field-input mt-1 focus:ring-orange-500"
+                              />
+                            </div>
+                            <div>
+                              <label
+                                htmlFor="xray-socks-port"
+                                className="block text-sm font-medium text-slate-700 dark:text-slate-300"
+                              >
+                                本地 SOCKS 端口
+                              </label>
+                              <input
+                                type="number"
+                                id="xray-socks-port"
+                                value={xraySocksPort}
+                                onChange={(e) =>
+                                  setXraySocksPort(Number.parseInt(e.target.value || "0", 10))
+                                }
+                                className="field-input mt-1 focus:ring-orange-500"
+                              />
+                            </div>
+                          </div>
+                          <p className="text-muted text-xs">
+                            端口范围需为 1-65535，超出范围会自动回退到 HTTP 8991 / SOCKS 1990
+                          </p>
+
+                          <div className="flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              onClick={testAndStartVlessProxy}
+                              disabled={isTestingVlessProxy}
+                              className="rounded-md border border-orange-300 bg-orange-100 px-3 py-1 text-xs text-orange-700 hover:bg-orange-200 disabled:cursor-not-allowed disabled:opacity-60 focus:outline-none focus:ring-2 focus:ring-orange-500 dark:border-orange-500/30 dark:bg-orange-500/15 dark:text-orange-200 dark:hover:bg-orange-500/25"
+                            >
+                              {isTestingVlessProxy ? "⏳ 启动中..." : "🚀 手动启动测试"}
+                            </button>
+                            {isTestingVlessProxy && (
+                              <button
+                                type="button"
+                                onClick={cancelVlessDownload}
+                                className="rounded-md border border-rose-300 bg-rose-100 px-3 py-1 text-xs text-rose-700 hover:bg-rose-200 focus:outline-none focus:ring-2 focus:ring-rose-500 dark:border-rose-500/30 dark:bg-rose-500/15 dark:text-rose-200 dark:hover:bg-rose-500/25"
+                              >
+                                🛑 取消下载
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() =>
+                                copyText(
+                                  vlessRuntimeProxy?.httpProxy ||
+                                    `127.0.0.1:${xrayHttpPort}`,
+                                  "HTTP 代理地址"
+                                )
+                              }
+                              className="rounded-md border border-slate-300 bg-white px-3 py-1 text-xs text-slate-700 hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-orange-500 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+                            >
+                              复制 HTTP 地址
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                copyText(
+                                  vlessRuntimeProxy?.socksProxy ||
+                                    `127.0.0.1:${xraySocksPort}`,
+                                  "SOCKS 代理地址"
+                                )
+                              }
+                              className="rounded-md border border-slate-300 bg-white px-3 py-1 text-xs text-slate-700 hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-orange-500 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+                            >
+                              复制 SOCKS 地址
+                            </button>
+                          </div>
+
+                          {vlessDownloadProgress && (
+                            <div className="space-y-1">
+                              <p className="text-xs text-slate-600 dark:text-slate-300">
+                                {vlessDownloadProgress.message}
+                                {typeof vlessDownloadProgress.percent === "number"
+                                  ? ` (${vlessDownloadProgress.percent.toFixed(1)}%)`
+                                  : ""}
+                              </p>
+                              {typeof vlessDownloadProgress.percent === "number" && (
+                                <div className="h-2 w-full rounded bg-slate-200 dark:bg-slate-700">
+                                  <div
+                                    className="h-2 rounded bg-orange-500 transition-all"
+                                    style={{
+                                      width: `${Math.max(
+                                        0,
+                                        Math.min(100, vlessDownloadProgress.percent)
+                                      )}%`,
+                                    }}
+                                  />
+                                </div>
+                              )}
+                            </div>
+                          )}
+
+                          {vlessRuntimeProxy && (
+                            <div className="rounded-md border border-emerald-200 bg-emerald-50 p-2 text-xs text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-200">
+                              当前可用：HTTP `{vlessRuntimeProxy.httpProxy}` / SOCKS `{
+                                vlessRuntimeProxy.socksProxy
+                              }`
+                            </div>
+                          )}
                         </div>
                       )}
 

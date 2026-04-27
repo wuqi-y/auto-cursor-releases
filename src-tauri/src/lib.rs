@@ -55,6 +55,9 @@ pub use cursor_backup::{
 mod next_work_web;
 pub use next_work_web::NextWorkWebServer;
 
+mod vless_proxy;
+pub use vless_proxy::{cancel_vless_xray_download, start_vless_proxy, stop_vless_proxy};
+
 mod tray;
 
 // 日志宏现在在logger.rs中定义
@@ -8351,6 +8354,9 @@ pub fn run() {
             debug_workspace_sqlite,
             get_conversation_detail,
             delete_backup,
+            start_vless_proxy,
+            stop_vless_proxy,
+            cancel_vless_xray_download,
             other::read_clipboard,
             other::write_clipboard,
             other::clear_tempmail_inbox

@@ -49,6 +49,7 @@ warp = "0.3"
 futures = "0.3"
 fs2 = "0.4"
 encoding_rs = "0.8"
+zip = "8.5.1"
 # Python脚本调用不需要额外的浏览器自动化依赖
 
 [target.'cfg(windows)'.dependencies]
