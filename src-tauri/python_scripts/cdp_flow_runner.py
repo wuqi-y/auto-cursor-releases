@@ -7,7 +7,7 @@ import subprocess
 import sys
 import time
 import tempfile
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 import requests
 
@@ -58,6 +58,7 @@ BIRTHDAY_INPUT_TOKEN = "__BIRTHDAY_2002_03_12__"
 
 def _read_verification_code_from_file(
     page: Any = None,
+    retry_password_handler: Optional[Callable[[Any], bool]] = None,
     timeout_s: float = 180.0,
     poll_interval_s: float = 1.0,
     request_reemit_interval_s: float = 8.0,
@@ -77,6 +78,8 @@ def _read_verification_code_from_file(
     resend_index = 0
     started_at = time.time()
     next_reemit_at = time.time() + max(2.0, request_reemit_interval_s)
+    retry_check_interval_s = max(1.5, min(4.0, request_reemit_interval_s / 2.0))
+    next_retry_check_at = time.time() + min(1.0, retry_check_interval_s)
     manual_input_announced = False
     next_manual_reemit_at = 0.0
     while True:
@@ -97,6 +100,18 @@ def _read_verification_code_from_file(
                 return code
         # 低频重发请求，避免消息桥偶发丢失导致第二次验证码流程“无响应”。
         now = time.time()
+        if page is not None and retry_password_handler is not None and now >= next_retry_check_at:
+            retry_ok = retry_password_handler(page)
+            next_retry_check_at = time.time() + retry_check_interval_s
+            if retry_ok:
+                started_at = time.time()
+                end_at = started_at + max(0.0, timeout_s)
+                resend_index = 0
+                manual_input_announced = False
+                next_manual_reemit_at = 0.0
+                next_reemit_at = started_at + max(2.0, request_reemit_interval_s)
+                _safe_print("request_verification_code")
+                continue
         if page is not None and resend_index < len(resend_schedule_s):
             resend_after_s = resend_schedule_s[resend_index]
             if now - started_at >= resend_after_s:
@@ -617,6 +632,42 @@ def _try_input(page: Any, selector: str, value: str, timeout_s: float = 10.0) ->
         return False
 
 
+def _try_input_like_human(
+    page: Any,
+    selector: str,
+    value: str,
+    timeout_s: float = 10.0,
+    min_key_delay_s: float = 0.08,
+    max_key_delay_s: float = 0.22,
+) -> bool:
+    try:
+        ele = page.ele(selector, timeout=timeout_s)
+        if not ele:
+            return False
+        try:
+            ele.click()
+        except Exception:
+            pass
+        try:
+            ele.clear()
+        except Exception:
+            pass
+
+        for ch in value:
+            ele.input(ch)
+            time.sleep(random.uniform(min_key_delay_s, max_key_delay_s))
+        return True
+    except Exception:
+        return False
+
+
+def _has_element(page: Any, selector: str, timeout_s: float = 2.0) -> bool:
+    try:
+        return page.ele(selector, timeout=timeout_s) is not None
+    except Exception:
+        return False
+
+
 def _wait_page_loaded(page: Any, timeout_s: float = 20.0) -> bool:
     """
     Best-effort wait for page load complete.
@@ -647,6 +698,159 @@ def _wait_page_loaded(page: Any, timeout_s: float = 20.0) -> bool:
         except Exception:
             pass
         time.sleep(0.25)
+    return False
+
+
+def _get_page_text(page: Any) -> str:
+    try:
+        text = page.run_js(
+            "return document.body ? (document.body.innerText || document.body.textContent || '') : ''"
+        )
+        return str(text or "")
+    except Exception:
+        return ""
+
+
+def _page_url_contains(page: Any, token: str) -> bool:
+    try:
+        return token.lower() in str(page.url or "").lower()
+    except Exception:
+        return False
+
+
+def _looks_like_password_field(selector: str) -> bool:
+    s = (selector or "").lower()
+    return (
+        "@name=password" in s
+        or "name=password" in s
+        or "name='password'" in s
+        or "name=\"password\"" in s
+        or "type='password'" in s
+        or "type=\"password\"" in s
+        or "#password" in s
+    )
+
+
+def _find_first_selector(page: Any, selectors: List[str], timeout_s: float = 2.0) -> str:
+    for selector in selectors:
+        if _has_element(page, selector, timeout_s=timeout_s):
+            return selector
+    return ""
+
+
+def _is_timeout_failure_page(page: Any) -> Tuple[bool, str]:
+    retry_selectors = [
+        "css:button[data-dd-action-name='Try again']",
+        "xpath://button[@data-dd-action-name='Try again']",
+        "xpath://button[contains(normalize-space(.), 'Try again')]",
+        "xpath://button[contains(normalize-space(.), '重试')]",
+    ]
+    page_text = _get_page_text(page).lower()
+    has_timeout_text = any(token in page_text for token in ("operation timed out", "timed out"))
+    retry_selector = _find_first_selector(page, retry_selectors, timeout_s=2.0)
+    return has_timeout_text and bool(retry_selector), retry_selector
+
+
+def _retry_password_after_timeout(
+    page: Any,
+    *,
+    password_value: str,
+    password_selector: str = "",
+    element_timeout_s: float = 10.0,
+    wait_after_action_s: float = 1.0,
+    max_attempts: int = 6,
+) -> bool:
+    if not password_value:
+        return False
+
+    handled_retry = False
+    password_selectors: List[str] = []
+    if password_selector:
+        password_selectors.append(password_selector)
+    password_selectors.extend(
+        [
+            "@name=password",
+            "css:input[name='password']",
+            "css:input[type='password']",
+            "xpath://input[@type='password']",
+        ]
+    )
+
+    deduped_password_selectors: List[str] = []
+    for selector in password_selectors:
+        if selector and selector not in deduped_password_selectors:
+            deduped_password_selectors.append(selector)
+
+    submit_selectors = [
+        "css:button[type='submit']",
+        "xpath://button[@type='submit']",
+        "xpath://button[contains(normalize-space(.), '继续')]",
+        "xpath://button[contains(normalize-space(.), 'Continue')]",
+    ]
+
+    for attempt in range(1, max_attempts + 1):
+        is_failure, retry_selector = _is_timeout_failure_page(page)
+        if is_failure and retry_selector:
+            if not _try_click(page, retry_selector, timeout_s=min(8.0, element_timeout_s)):
+                return False
+            handled_retry = True
+            _safe_print(
+                f"{Fore.CYAN}🖱️ 检测到超时失败页，已触发重试按钮 {retry_selector!r}（第 {attempt} 次）{Style.RESET_ALL}"
+            )
+            _wait_page_loaded(page, timeout_s=max(10.0, element_timeout_s + 5.0))
+            time.sleep(max(1.0, wait_after_action_s))
+
+        if _page_url_contains(page, "password"):
+            input_ok = False
+            used_password_selector = ""
+            for selector in deduped_password_selectors:
+                if _try_input_like_human(page, selector, password_value, timeout_s=element_timeout_s):
+                    input_ok = True
+                    used_password_selector = selector
+                    break
+            if not input_ok:
+                _safe_print(
+                    f"{Fore.YELLOW}⚠️ 已回到密码页，但未找到可输入密码的输入框{Style.RESET_ALL}"
+                )
+                return False
+
+            _safe_print(
+                f"{Fore.CYAN}🔐 已回到密码页，重新输入密码 {used_password_selector!r}{Style.RESET_ALL}"
+            )
+            time.sleep(3.0)
+
+            submit_ok = False
+            used_submit_selector = ""
+            for selector in submit_selectors:
+                if _try_click(page, selector, timeout_s=element_timeout_s):
+                    submit_ok = True
+                    used_submit_selector = selector
+                    break
+            if not submit_ok:
+                _safe_print(
+                    f"{Fore.YELLOW}⚠️ 已重新输入密码，但未找到继续按钮提交{Style.RESET_ALL}"
+                )
+                return False
+
+            _safe_print(
+                f"{Fore.CYAN}🖱️ 已重新提交密码 {used_submit_selector!r}{Style.RESET_ALL}"
+            )
+            handled_retry = True
+            _wait_page_loaded(page, timeout_s=max(10.0, element_timeout_s + 8.0))
+            time.sleep(max(1.0, wait_after_action_s))
+
+            is_failure, _ = _is_timeout_failure_page(page)
+            if is_failure:
+                continue
+            return True
+
+        is_failure, _ = _is_timeout_failure_page(page)
+        if handled_retry and not is_failure:
+            return True
+        if not handled_retry:
+            return False
+
+    _safe_print(f"{Fore.YELLOW}⚠️ 重试多次后仍停留在超时失败页{Style.RESET_ALL}")
     return False
 
 
@@ -881,6 +1085,8 @@ def _run_post_oauth_step1_in_same_browser(page: Any, register_email_hint: str) -
 
     # 3) 再点 intent（排除 type=submit）
     intent_selectors = [
+        "xpath://button[@name='intent' and @value='passwordless_login_send_otp' and not(@type='submit')]",
+        "xpath://*[@name='intent' and @value='passwordless_login_send_otp' and not(@type='submit')]",
         "xpath://button[@name='intent' and not(@type='submit')]",
         "xpath://*[@name='intent' and not(@type='submit')]",
     ]
@@ -1035,6 +1241,8 @@ def run_flow(
 
         ordered_steps: List[Tuple[str, str]] = []
         register_email_hint = ""
+        password_retry_selector = ""
+        password_retry_value = ""
         if steps:
             ordered_steps.extend(steps)
         else:
@@ -1072,6 +1280,15 @@ def run_flow(
                 if "@" in val and "." in val:
                     register_email_hint = val
 
+                if _looks_like_password_field(sel) and val not in (
+                    OAI_CODE_INPUT_TOKEN,
+                    OAI_CODE_INPUT_TOKEN_AUTO,
+                    RANDOM_NAME_INPUT_TOKEN,
+                    BIRTHDAY_INPUT_TOKEN,
+                ):
+                    password_retry_selector = sel
+                    password_retry_value = val
+
                 if val == RANDOM_NAME_INPUT_TOKEN and _looks_like_name_field(sel):
                     val = _random_en_name()
 
@@ -1084,17 +1301,39 @@ def run_flow(
                 )
                 if should_auto_fetch_code:
                     _safe_print(f"{Fore.CYAN}📨 触发自动获取验证码: {sel!r}{Style.RESET_ALL}")
-                    code = _read_verification_code_from_file(page) if os.environ.get("CURSOR_VERIFICATION_CODE_FILE") else get_oai_code(register_email_hint)
+                    retry_password_handler: Optional[Callable[[Any], bool]] = None
+                    if password_retry_value:
+                        retry_password_handler = lambda current_page: _retry_password_after_timeout(
+                            current_page,
+                            password_value=password_retry_value,
+                            password_selector=password_retry_selector,
+                            element_timeout_s=element_timeout_s,
+                            wait_after_action_s=wait_after_action_s,
+                        )
+                    code = (
+                        _read_verification_code_from_file(
+                            page, retry_password_handler=retry_password_handler
+                        )
+                        if os.environ.get("CURSOR_VERIFICATION_CODE_FILE")
+                        else get_oai_code(register_email_hint)
+                    )
                     if not code:
                         _safe_print(
                             f"{Fore.RED}❌ 自动获取验证码失败，请检查测试邮箱接口配置{Style.RESET_ALL}"
                         )
                         return 4
                     val = code
-                ok = _try_input(page, sel, val, timeout_s=element_timeout_s)
+                is_password_input = _looks_like_password_field(sel)
+                if is_password_input:
+                    ok = _try_input_like_human(page, sel, val, timeout_s=element_timeout_s)
+                else:
+                    ok = _try_input(page, sel, val, timeout_s=element_timeout_s)
                 _safe_print(
                     f"{Fore.CYAN}⌨️ input {sel!r}: {('OK' if ok else 'MISS')}{Style.RESET_ALL}"
                 )
+                if ok and is_password_input:
+                    _safe_print(f"{Fore.CYAN}⏳ 密码输入完成，等待 3 秒后继续{Style.RESET_ALL}")
+                    time.sleep(3.0)
                 if (not ok) and should_auto_fetch_code and sel.strip().lower() in ("@name=otp", "name=otp"):
                     fallback_sel = "@name=code"
                     _safe_print(f"{Fore.YELLOW}↩️ otp 输入失败，回退尝试 {fallback_sel!r}{Style.RESET_ALL}")
