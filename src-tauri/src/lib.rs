@@ -471,6 +471,7 @@ struct CloudflareMail {
 struct CodexTokenFileInfo {
     file_name: String,
     file_path: String,
+    created_at_unix: u64,
     updated_at_unix: u64,
     content: String,
 }
@@ -1930,6 +1931,12 @@ async fn list_codex_token_files() -> Result<Vec<CodexTokenFileInfo>, String> {
             .map_err(|e| format!("Failed to read token file {}: {}", file_name, e))?;
         let metadata = fs::metadata(&path)
             .map_err(|e| format!("Failed to read metadata for {}: {}", file_name, e))?;
+        let created_at_unix = metadata
+            .created()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         let updated_at_unix = metadata
             .modified()
             .ok()
@@ -1940,6 +1947,7 @@ async fn list_codex_token_files() -> Result<Vec<CodexTokenFileInfo>, String> {
         items.push(CodexTokenFileInfo {
             file_name: file_name.to_string(),
             file_path: path.to_string_lossy().to_string(),
+            created_at_unix,
             updated_at_unix,
             content,
         });
@@ -3715,9 +3723,39 @@ async fn batch_register_with_email_parallel(
         match task.await {
             Ok(Ok(result)) => {
                 results.push(result);
+                if let Some(item) = results.last() {
+                    emit_batch_registration_progress(
+                        &app,
+                        "cursor",
+                        "parallel",
+                        item.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+                        item.get("email").and_then(|v| v.as_str()).unwrap_or(""),
+                        true,
+                        None,
+                        results.len() + errors.len(),
+                        total_count,
+                        results.len(),
+                        errors.len(),
+                    );
+                }
             }
             Ok(Err(error)) => {
                 errors.push(error);
+                if let Some(item) = errors.last() {
+                    emit_batch_registration_progress(
+                        &app,
+                        "cursor",
+                        "parallel",
+                        item.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+                        item.get("email").and_then(|v| v.as_str()).unwrap_or(""),
+                        false,
+                        item.get("error").and_then(|v| v.as_str()),
+                        results.len() + errors.len(),
+                        total_count,
+                        results.len(),
+                        errors.len(),
+                    );
+                }
             }
             Err(e) => {
                 log_error!("❌ 任务执行失败: {}", e);
@@ -3725,6 +3763,19 @@ async fn batch_register_with_email_parallel(
                     "success": false,
                     "error": format!("任务执行失败: {}", e)
                 }));
+                emit_batch_registration_progress(
+                    &app,
+                    "cursor",
+                    "parallel",
+                    results.len() + errors.len() - 1,
+                    "",
+                    false,
+                    Some(&format!("任务执行失败: {}", e)),
+                    results.len() + errors.len(),
+                    total_count,
+                    results.len(),
+                    errors.len(),
+                );
             }
         }
     }
@@ -3768,8 +3819,10 @@ async fn batch_register_with_email(
     skip_phone_verification: Option<bool>,
     selected_card_indices: Option<Vec<u32>>, // 选中的银行卡索引列表
     config: Option<serde_json::Value>,       // 新增：配置JSON，包含订阅配置等
+    batch_delay_seconds: Option<u64>,
 ) -> Result<serde_json::Value, String> {
     let email_type_str = email_type.as_deref().unwrap_or("custom");
+    let batch_delay_seconds = batch_delay_seconds.unwrap_or(10).min(600);
     log_info!(
         "🔄 批量注册 {} 个 Cursor 账户（串行模式，邮箱类型：{}）...",
         emails.len(),
@@ -3830,6 +3883,16 @@ async fn batch_register_with_email(
     let mut errors = Vec::new();
 
     for i in 0..emails.len() {
+        if i > 0 {
+            log_info!(
+                "⏳ [任务 {}/{}] 等待 {} 秒后开始下一个注册任务...",
+                i + 1,
+                emails.len(),
+                batch_delay_seconds
+            );
+            tokio::time::sleep(tokio::time::Duration::from_secs(batch_delay_seconds)).await;
+        }
+
         let email = emails[i].clone();
         let first_name = first_names[i].clone();
         let last_name = last_names[i].clone();
@@ -4001,7 +4064,7 @@ async fn batch_register_with_email(
             Err(_) => email.clone(),
         };
 
-        match result {
+        let (task_success, task_error_message) = match result {
             Ok(result) => {
                 log_info!(
                     "✅ [任务 {}/{}] 注册成功: {}",
@@ -4015,6 +4078,7 @@ async fn batch_register_with_email(
                     "success": true,
                     "result": result
                 }));
+                (true, None)
             }
             Err(e) => {
                 log_error!(
@@ -4030,14 +4094,29 @@ async fn batch_register_with_email(
                     "success": false,
                     "error": e
                 }));
+                (
+                    false,
+                    errors
+                        .last()
+                        .and_then(|item| item.get("error").and_then(|value| value.as_str())),
+                )
             }
-        }
+        };
 
-        // 添加短暂延迟，让系统有时间清理资源
-        if i < emails.len() - 1 {
-            log_info!("⏱️  等待 2 秒后开始下一个注册任务...");
-            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-        }
+        emit_batch_registration_progress(
+            &app,
+            "cursor",
+            "serial",
+            i,
+            &actual_email,
+            task_success,
+            task_error_message,
+            results.len() + errors.len(),
+            emails.len(),
+            results.len(),
+            errors.len(),
+        );
+
     }
 
     // 注意：不再需要恢复配置，因为现在通过config传递cardIndex，不会修改配置文件
@@ -5823,12 +5902,61 @@ async fn batch_register_codex_with_email_parallel(
 
     for task in tasks {
         match task.await {
-            Ok(Ok(result)) => results.push(result),
-            Ok(Err(error)) => errors.push(error),
-            Err(e) => errors.push(serde_json::json!({
+            Ok(Ok(result)) => {
+                results.push(result);
+                if let Some(item) = results.last() {
+                    emit_batch_registration_progress(
+                        &app,
+                        "codex",
+                        "parallel",
+                        item.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+                        item.get("email").and_then(|v| v.as_str()).unwrap_or(""),
+                        true,
+                        None,
+                        results.len() + errors.len(),
+                        total_count,
+                        results.len(),
+                        errors.len(),
+                    );
+                }
+            },
+            Ok(Err(error)) => {
+                errors.push(error);
+                if let Some(item) = errors.last() {
+                    emit_batch_registration_progress(
+                        &app,
+                        "codex",
+                        "parallel",
+                        item.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+                        item.get("email").and_then(|v| v.as_str()).unwrap_or(""),
+                        false,
+                        item.get("error").and_then(|v| v.as_str()),
+                        results.len() + errors.len(),
+                        total_count,
+                        results.len(),
+                        errors.len(),
+                    );
+                }
+            },
+            Err(e) => {
+                errors.push(serde_json::json!({
                 "success": false,
                 "error": format!("任务执行失败: {}", e)
-            })),
+                }));
+                emit_batch_registration_progress(
+                    &app,
+                    "codex",
+                    "parallel",
+                    results.len() + errors.len() - 1,
+                    "",
+                    false,
+                    Some(&format!("浠诲姟鎵ц澶辫触: {}", e)),
+                    results.len() + errors.len(),
+                    total_count,
+                    results.len(),
+                    errors.len(),
+                );
+            }
         }
     }
 
@@ -5857,8 +5985,10 @@ async fn batch_register_codex_with_email(
     self_hosted_mail_clear_method: Option<String>,
     use_incognito: Option<bool>,
     config: Option<serde_json::Value>,
+    batch_delay_seconds: Option<u64>,
 ) -> Result<serde_json::Value, String> {
     log_info!("🔄 批量注册 {} 个 Codex 账户（串行模式）...", emails.len());
+    let batch_delay_seconds = batch_delay_seconds.unwrap_or(10).min(600);
 
     if emails.len() != first_names.len() || emails.len() != last_names.len() {
         return Err("邮箱、姓名数量不一致".to_string());
@@ -5878,6 +6008,16 @@ async fn batch_register_codex_with_email(
     let mut errors = Vec::new();
 
     for i in 0..emails.len() {
+        if i > 0 {
+            log_info!(
+                "⏳ [任务 {}/{}] 等待 {} 秒后开始下一个 Codex 注册任务...",
+                i + 1,
+                emails.len(),
+                batch_delay_seconds
+            );
+            tokio::time::sleep(tokio::time::Duration::from_secs(batch_delay_seconds)).await;
+        }
+
         let email = emails[i].clone();
         let first_name = first_names[i].clone();
         let last_name = last_names[i].clone();
@@ -5910,24 +6050,46 @@ async fn batch_register_codex_with_email(
             Err(_) => email.clone(),
         };
 
-        match result {
-            Ok(result) => results.push(serde_json::json!({
-                "index": i,
-                "email": actual_email,
-                "success": true,
-                "result": result
-            })),
-            Err(e) => errors.push(serde_json::json!({
-                "index": i,
-                "email": actual_email,
-                "success": false,
-                "error": e
-            })),
-        }
+        let (task_success, task_error_message) = match result {
+            Ok(result) => {
+                results.push(serde_json::json!({
+                    "index": i,
+                    "email": actual_email,
+                    "success": true,
+                    "result": result
+                }));
+                (true, None)
+            }
+            Err(e) => {
+                errors.push(serde_json::json!({
+                    "index": i,
+                    "email": actual_email,
+                    "success": false,
+                    "error": e
+                }));
+                (
+                    false,
+                    errors
+                        .last()
+                        .and_then(|item| item.get("error").and_then(|value| value.as_str())),
+                )
+            }
+        };
 
-        if i < emails.len() - 1 {
-            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-        }
+        emit_batch_registration_progress(
+            &app,
+            "codex",
+            "serial",
+            i,
+            &actual_email,
+            task_success,
+            task_error_message,
+            results.len() + errors.len(),
+            emails.len(),
+            results.len(),
+            errors.len(),
+        );
+
     }
 
     Ok(serde_json::json!({
@@ -6002,6 +6164,10 @@ async fn register_codex_with_self_hosted_mail_api(
     } else {
         serde_json::json!({})
     };
+    let require_manual_confirm_before_post_oauth = final_config
+        .get("manualConfirmBeforePostOauth")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
     let cdp_overrides = final_config
         .get("codexCdpOverrides")
         .cloned()
@@ -6011,6 +6177,7 @@ async fn register_codex_with_self_hosted_mail_api(
         })
         .transpose()?;
     if let Some(config_obj) = final_config.as_object_mut() {
+        config_obj.remove("manualConfirmBeforePostOauth");
         config_obj.remove("codexCdpOverrides");
     }
     let config_json_str =
@@ -6066,6 +6233,14 @@ async fn register_codex_with_self_hosted_mail_api(
         .env("CURSOR_REGISTRATION_STOP_FILE", &stop_file_path)
         .env("CDP_FLOW_CONTINUE_FILE", &continue_file_path)
         .env("CDP_FLOW_CANCEL_FILE", &cancel_file_path)
+        .env(
+            "CDP_FLOW_REQUIRE_MANUAL_CONFIRM_BEFORE_POST_OAUTH",
+            if require_manual_confirm_before_post_oauth {
+                "1"
+            } else {
+                "0"
+            },
+        )
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -6123,7 +6298,6 @@ async fn register_codex_with_self_hosted_mail_api(
     let email_for_stdout = email.clone();
     let task_id_for_stdout = task_id.clone();
     let code_file_for_thread = code_file_path.clone();
-    let continue_file_for_thread = continue_file_path.clone();
     let stdout_task = std::thread::spawn(move || {
         use std::io::{BufRead, BufReader};
         let mut reader = BufReader::new(stdout);
@@ -6175,7 +6349,6 @@ async fn register_codex_with_self_hosted_mail_api(
                             let clear_method_task = clear_method.clone();
                             let app_task = app_for_stdout.clone();
                             let code_file_task = code_file_for_thread.clone();
-                            let continue_file_task = continue_file_for_thread.clone();
                             let task_id_task = task_id_for_stdout.clone();
                             let email_task = email_for_stdout.clone();
                             let fetch_flag = self_hosted_fetch_in_progress.clone();
@@ -6201,7 +6374,6 @@ async fn register_codex_with_self_hosted_mail_api(
                                         Ok(code) => {
                                             log_info!("🎯 Codex 自动获取到验证码: {}", code);
                                             let _ = std::fs::write(&code_file_task, &code);
-                                            let _ = std::fs::write(&continue_file_task, "continue");
                                             let _ = app_task
                                                 .emit("verification-code-auto-filled", &code);
                                         }
@@ -6224,11 +6396,33 @@ async fn register_codex_with_self_hosted_mail_api(
                                                     "email": email_task
                                                 }),
                                             );
-                                            let _ = std::fs::write(&continue_file_task, "continue");
                                         }
                                     }
                                 });
                             });
+                        }
+                    }
+
+                    if let Ok(event_payload) =
+                        serde_json::from_str::<serde_json::Value>(&line_content)
+                    {
+                        if event_payload
+                            .get("action")
+                            .and_then(|value| value.as_str())
+                            == Some("wait_for_user")
+                        {
+                            let _ = app_for_stdout.emit(
+                                "codex-manual-step-required",
+                                serde_json::json!({
+                                    "task_id": task_id_for_stdout,
+                                    "email": email_for_stdout,
+                                    "reason": event_payload.get("reason").and_then(|value| value.as_str()).unwrap_or("manual_step"),
+                                    "message": event_payload.get("message").and_then(|value| value.as_str()).unwrap_or("请完成手动步骤后继续"),
+                                    "continue_file": event_payload.get("continue_file").and_then(|value| value.as_str()),
+                                    "cancel_file": event_payload.get("cancel_file").and_then(|value| value.as_str()),
+                                    "status": event_payload.get("status").and_then(|value| value.as_str()).unwrap_or("waiting")
+                                }),
+                            );
                         }
                     }
 
@@ -6251,7 +6445,6 @@ async fn register_codex_with_self_hosted_mail_api(
     let app_for_stderr = app.clone();
     let task_id_for_stderr = task_id.clone();
     let email_for_stderr = email.clone();
-    let continue_file_for_stderr = continue_file_path.clone();
     let _stderr_task = std::thread::spawn(move || {
         use std::io::{BufRead, BufReader};
         let mut reader = BufReader::new(stderr);
@@ -6273,7 +6466,6 @@ async fn register_codex_with_self_hosted_mail_api(
                                 "email": email_for_stderr
                             }),
                         );
-                        let _ = std::fs::write(&continue_file_for_stderr, "continue");
                     }
                     let _ = app_for_stderr.emit(
                         "registration-output",
@@ -6704,6 +6896,61 @@ async fn submit_verification_code(
         }
         Err(e) => Err(format!("保存验证码失败: {}", e)),
     }
+}
+
+#[tauri::command]
+async fn signal_registration_continue(
+    task_id: String,
+    action: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let signal = action
+        .unwrap_or_else(|| "continue".to_string())
+        .trim()
+        .to_string();
+    if signal.is_empty() {
+        return Err("继续信号不能为空".to_string());
+    }
+
+    let signal_file = std::env::temp_dir().join(format!("cdp_flow_continue_{}.txt", task_id));
+    std::fs::write(&signal_file, &signal)
+        .map_err(|e| format!("写入继续信号失败: {}", e))?;
+
+    Ok(serde_json::json!({
+        "success": true,
+        "message": "继续信号已发送",
+        "task_id": task_id,
+        "action": signal
+    }))
+}
+
+fn emit_batch_registration_progress(
+    app: &tauri::AppHandle,
+    provider: &str,
+    mode: &str,
+    index: usize,
+    email: &str,
+    success: bool,
+    error: Option<&str>,
+    completed: usize,
+    total: usize,
+    succeeded: usize,
+    failed: usize,
+) {
+    let _ = app.emit(
+        "batch-registration-progress",
+        serde_json::json!({
+            "provider": provider,
+            "mode": mode,
+            "index": index,
+            "email": email,
+            "success": success,
+            "error": error,
+            "completed": completed,
+            "total": total,
+            "succeeded": succeeded,
+            "failed": failed
+        }),
+    );
 }
 
 #[tauri::command]
@@ -8312,6 +8559,7 @@ pub fn run() {
             register_with_self_hosted_mail_api,
             register_codex_with_self_hosted_mail_api,
             submit_verification_code,
+            signal_registration_continue,
             cancel_registration,
             cancel_registration_task,
             get_saved_accounts,

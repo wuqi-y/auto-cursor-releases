@@ -45,6 +45,7 @@ export interface ConfigData {
   useIncognito?: CacheItem<boolean>;
   enableBankCardBinding?: CacheItem<boolean>;
   useParallelMode?: CacheItem<boolean>;
+  batchSerialDelaySeconds?: CacheItem<number>;
 
   /** 自建邮箱 API：拉取邮件列表的 URL */
   selfHostedMailUrl?: CacheItem<string>;
@@ -143,6 +144,10 @@ interface ConfigStore {
   getUseParallelMode: () => boolean | null;
   removeUseParallelMode: () => void;
 
+  setBatchSerialDelaySeconds: (seconds: number, expiresIn?: number) => void;
+  getBatchSerialDelaySeconds: () => number | null;
+  removeBatchSerialDelaySeconds: () => void;
+
   setSelfHostedMailUrl: (url: string, expiresIn?: number) => void;
   getSelfHostedMailUrl: () => string | null;
   setSelfHostedMailHeadersJson: (json: string, expiresIn?: number) => void;
@@ -198,6 +203,7 @@ const DEFAULT_EXPIRY = {
   useIncognito: undefined, // 无痕模式永不过期
   enableBankCardBinding: undefined, // 自动绑定银行卡永不过期
   useParallelMode: undefined, // 并行模式永不过期
+  batchSerialDelaySeconds: undefined,
   selfHostedMailUrl: undefined,
   selfHostedMailHeadersJson: undefined,
   selfHostedMailResponsePath: undefined,
@@ -419,6 +425,21 @@ export const useConfigStore = create<ConfigStore>()(
 
       removeUseParallelMode: () => {
         get().removeCache('useParallelMode');
+      },
+
+      setBatchSerialDelaySeconds: (
+        seconds: number,
+        expiresIn = DEFAULT_EXPIRY.batchSerialDelaySeconds
+      ) => {
+        get().setCache('batchSerialDelaySeconds', seconds, expiresIn);
+      },
+
+      getBatchSerialDelaySeconds: () => {
+        return get().getCache<number>('batchSerialDelaySeconds');
+      },
+
+      removeBatchSerialDelaySeconds: () => {
+        get().removeCache('batchSerialDelaySeconds');
       },
 
       setSelfHostedMailUrl: (url: string, expiresIn = DEFAULT_EXPIRY.selfHostedMailUrl) => {

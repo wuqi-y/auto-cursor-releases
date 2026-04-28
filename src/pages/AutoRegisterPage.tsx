@@ -12,10 +12,7 @@ import { EmailConfigService } from "../services/emailConfigService";
 import { CursorService } from "../services/cursorService";
 import { useProxyStore } from "../stores/proxyStore";
 import { useConfigStore } from "../stores/configStore";
-import type {
-  EmailType,
-  RegistrationProvider,
-} from "../stores/configStore";
+import type { EmailType, RegistrationProvider } from "../stores/configStore";
 import { BankCardConfig } from "../types/bankCardConfig";
 import { EmailConfig } from "../types/emailConfig";
 import { base64URLEncode, K, sha256 } from "../utils/cursorToken";
@@ -42,6 +39,29 @@ interface RegistrationResult {
     token: string;
     usage: string;
   };
+}
+
+interface BatchProgressEventPayload {
+  provider?: string;
+  mode?: string;
+  index?: number;
+  email?: string;
+  success?: boolean;
+  error?: string;
+  completed?: number;
+  total?: number;
+  succeeded?: number;
+  failed?: number;
+}
+
+interface CodexManualActionPayload {
+  task_id?: string | null;
+  email?: string | null;
+  reason?: string;
+  message?: string;
+  status?: string;
+  continue_file?: string | null;
+  cancel_file?: string | null;
 }
 
 type CodexCdpStep =
@@ -74,9 +94,17 @@ const DEFAULT_CODEX_CDP_OVERRIDES: CodexCdpOverrides = {
       selector: "css:a[data-discover='true']",
       waitForLoad: true,
     },
-    { type: "input", selector: "css:input[type='email']", value: "__REGISTER_EMAIL__" },
+    {
+      type: "input",
+      selector: "css:input[type='email']",
+      value: "__REGISTER_EMAIL__",
+    },
     { type: "click", selector: "css:button[type='submit']" },
-    { type: "input", selector: "css:input[type='password']", value: "__ACCESS_PASSWORD__" },
+    {
+      type: "input",
+      selector: "css:input[type='password']",
+      value: "__ACCESS_PASSWORD__",
+    },
     { type: "click", selector: "css:button[type='submit']" },
     { type: "input", selector: "@name=otp", value: "__AUTO__" },
     { type: "input", selector: "@name=name", value: "__RANDOM_EN_NAME__" },
@@ -99,10 +127,13 @@ const DEFAULT_CODEX_CDP_OVERRIDES: CodexCdpOverrides = {
 const DEFAULT_CODEX_CDP_OVERRIDES_JSON = JSON.stringify(
   DEFAULT_CODEX_CDP_OVERRIDES,
   null,
-  2
+  2,
 );
+const DEFAULT_BATCH_SERIAL_DELAY_SECONDS = 10;
 
-const isRegistrationSuccessResult = (result: RegistrationResult | null): boolean => {
+const isRegistrationSuccessResult = (
+  result: RegistrationResult | null,
+): boolean => {
   if (!result) return false;
 
   if (result.success === true || result.success === "completed") return true;
@@ -133,7 +164,7 @@ export const AutoRegisterPage: React.FC = () => {
     useState<RegistrationProvider>("cursor");
   const [emailType, setEmailType] = useState<EmailType>("custom");
   const [outlookMode, setOutlookMode] = useState<"default" | "token">(
-    "default"
+    "default",
   );
   const [outlookEmail, setOutlookEmail] = useState("");
 
@@ -144,20 +175,21 @@ export const AutoRegisterPage: React.FC = () => {
   /** 自建邮箱 API：与 Rust 中 GET 拉取邮件列表一致 */
   const [selfHostedMailUrl, setSelfHostedMailUrl] = useState("");
   const [selfHostedMailHeadersJson, setSelfHostedMailHeadersJson] = useState(
-    '{\n  "Authorization": "Bearer ",\n  "Content-Type": "application/json"\n}'
+    '{\n  "Authorization": "Bearer ",\n  "Content-Type": "application/json"\n}',
   );
-  const [selfHostedMailResponsePath, setSelfHostedMailResponsePath] = useState(
-    "results[0].raw"
-  );
+  const [selfHostedMailResponsePath, setSelfHostedMailResponsePath] =
+    useState("results[0].raw");
   const [selfHostedMailClearEnabled, setSelfHostedMailClearEnabled] =
     useState(false);
   const [selfHostedMailClearUrl, setSelfHostedMailClearUrl] = useState("");
   const [selfHostedMailClearHeadersJson, setSelfHostedMailClearHeadersJson] =
-    useState('{\n  "Authorization": "Bearer ",\n  "Content-Type": "application/json"\n}');
+    useState(
+      '{\n  "Authorization": "Bearer ",\n  "Content-Type": "application/json"\n}',
+    );
   const [selfHostedMailClearMethod, setSelfHostedMailClearMethod] =
     useState("DELETE");
   const [codexCdpOverridesJson, setCodexCdpOverridesJson] = useState(
-    DEFAULT_CODEX_CDP_OVERRIDES_JSON
+    DEFAULT_CODEX_CDP_OVERRIDES_JSON,
   );
 
   const [useIncognito, setUseIncognito] = useState(true);
@@ -201,6 +233,8 @@ export const AutoRegisterPage: React.FC = () => {
     setEnableBankCardBinding: setCachedEnableBankCardBinding,
     getUseParallelMode,
     setUseParallelMode: setCachedUseParallelMode,
+    getBatchSerialDelaySeconds,
+    setBatchSerialDelaySeconds: setCachedBatchSerialDelaySeconds,
     getSelfHostedMailUrl,
     setSelfHostedMailUrl: setCachedSelfHostedMailUrl,
     getSelfHostedMailHeadersJson,
@@ -220,13 +254,16 @@ export const AutoRegisterPage: React.FC = () => {
     getCodexSelfHostedMailHeadersJson,
     setCodexSelfHostedMailHeadersJson: setCachedCodexSelfHostedMailHeadersJson,
     getCodexSelfHostedMailResponsePath,
-    setCodexSelfHostedMailResponsePath: setCachedCodexSelfHostedMailResponsePath,
+    setCodexSelfHostedMailResponsePath:
+      setCachedCodexSelfHostedMailResponsePath,
     getCodexSelfHostedMailClearEnabled,
-    setCodexSelfHostedMailClearEnabled: setCachedCodexSelfHostedMailClearEnabled,
+    setCodexSelfHostedMailClearEnabled:
+      setCachedCodexSelfHostedMailClearEnabled,
     getCodexSelfHostedMailClearUrl,
     setCodexSelfHostedMailClearUrl: setCachedCodexSelfHostedMailClearUrl,
     getCodexSelfHostedMailClearHeadersJson,
-    setCodexSelfHostedMailClearHeadersJson: setCachedCodexSelfHostedMailClearHeadersJson,
+    setCodexSelfHostedMailClearHeadersJson:
+      setCachedCodexSelfHostedMailClearHeadersJson,
     getCodexSelfHostedMailClearMethod,
     setCodexSelfHostedMailClearMethod: setCachedCodexSelfHostedMailClearMethod,
     getCodexCdpOverridesJson,
@@ -267,6 +304,9 @@ export const AutoRegisterPage: React.FC = () => {
   const [showPassword, setShowPassword] = useState(false);
   const [showVerificationModal, setShowVerificationModal] = useState(false);
   const [verificationCode, setVerificationCode] = useState("");
+  const [codexManualAction, setCodexManualAction] =
+    useState<CodexManualActionPayload | null>(null);
+  const [manualActionLoading, setManualActionLoading] = useState(false);
   const [currentTaskId, setCurrentTaskId] = useState<string | null>(null); // 当前需要验证码的任务ID
   const [currentTaskEmail, setCurrentTaskEmail] = useState<string | null>(null); // 当前需要验证码的任务邮箱
   const [realtimeOutput, setRealtimeOutput] = useState<string[]>([]);
@@ -275,11 +315,14 @@ export const AutoRegisterPage: React.FC = () => {
   const realtimeOutputRef = useRef<string[]>([]);
   const batchCountRef = useRef(1);
   const isBatchRegisteringRef = useRef(false);
+  const batchProgressEntriesRef = useRef<Map<number, string>>(new Map());
   const cancelledStopTaskIdsRef = useRef<Set<string>>(new Set());
   const registrationRunIdRef = useRef(0);
+  const currentTaskIdRef = useRef<string | null>(null);
+  const currentTaskEmailRef = useRef<string | null>(null);
   const [showBankCardConfig, setShowBankCardConfig] = useState(false);
   const [bankCardConfig, setBankCardConfig] = useState<BankCardConfig | null>(
-    null
+    null,
   );
   const [showEmailConfig, setShowEmailConfig] = useState(false);
   const [emailConfig, setEmailConfig] = useState<EmailConfig | null>(null);
@@ -288,11 +331,14 @@ export const AutoRegisterPage: React.FC = () => {
   const [showBrowserConfig, setShowBrowserConfig] = useState(false);
   const [customBrowserPath, setCustomBrowserPath] = useState<string>("");
   const [currentBrowserPath, setCurrentBrowserPath] = useState<string | null>(
-    null
+    null,
   );
 
   // 批量注册相关状态
   const [batchCount, setBatchCount] = useState(1);
+  const [batchSerialDelaySeconds, setBatchSerialDelaySeconds] = useState(
+    DEFAULT_BATCH_SERIAL_DELAY_SECONDS,
+  );
   const [batchEmails, setBatchEmails] = useState<string[]>([""]);
   const [useParallelMode, setUseParallelMode] = useState(true); // 并行模式开关，默认开启
 
@@ -313,6 +359,62 @@ export const AutoRegisterPage: React.FC = () => {
   }, [batchCount]);
 
   useEffect(() => {
+    currentTaskIdRef.current = currentTaskId;
+  }, [currentTaskId]);
+
+  useEffect(() => {
+    currentTaskEmailRef.current = currentTaskEmail;
+  }, [currentTaskEmail]);
+
+  const showCodexManualStepPrompt = (
+    payload: Partial<CodexManualActionPayload> = {},
+  ) => {
+    const fileTaskId =
+      payload.continue_file || payload.cancel_file
+        ? resolveCodexManualTaskId(payload as CodexManualActionPayload)
+        : null;
+    const taskId =
+      payload.task_id !== undefined
+        ? payload.task_id
+        : fileTaskId || currentTaskIdRef.current;
+    const email =
+      payload.email !== undefined ? payload.email : currentTaskEmailRef.current;
+
+    if (taskId) {
+      setCurrentTaskId(taskId);
+    }
+    if (email) {
+      setCurrentTaskEmail(email);
+    }
+
+    setCodexManualAction({
+      task_id: taskId ?? null,
+      email: email ?? null,
+      reason: payload.reason || "codex_manual_confirm_registration_complete",
+      message:
+        payload.message ||
+        "当前已经到 Step1 自动执行前的节点。如果自动注册没成功，请先在浏览器里手动完成注册，然后点击“手动确认注册完成并执行 Step1”；如果你确认这一步可以跳过，也可以直接继续。",
+      status: payload.status || "waiting",
+      continue_file: payload.continue_file ?? null,
+      cancel_file: payload.cancel_file ?? null,
+    });
+  };
+
+  const resolveCodexManualTaskId = (
+    payload: CodexManualActionPayload | null,
+  ): string | null => {
+    if (payload?.task_id?.trim()) {
+      return payload.task_id.trim();
+    }
+
+    const filePath = payload?.continue_file || payload?.cancel_file || "";
+    const match = filePath.match(
+      /(?:cdp_flow_continue_|cursor_registration_stop_)([^\\\/\s.]+)\.txt/i,
+    );
+    return match?.[1]?.trim() || null;
+  };
+
+  useEffect(() => {
     if (showVerificationModal) {
       // 弹窗提示
       confirm(
@@ -320,7 +422,7 @@ export const AutoRegisterPage: React.FC = () => {
         {
           title: "提示！",
           kind: "info",
-        }
+        },
       );
     }
   }, [showVerificationModal]);
@@ -373,6 +475,37 @@ export const AutoRegisterPage: React.FC = () => {
         async (event: any) => {
           console.log("收到实时输出事件:", event.payload);
           const data = event.payload;
+          if (
+            typeof data.line === "string" &&
+            data.line.trim().startsWith("{")
+          ) {
+            try {
+              const eventPayload = JSON.parse(data.line);
+              if (
+                eventPayload?.action === "wait_for_user" &&
+                eventPayload?.reason ===
+                  "codex_manual_confirm_registration_complete"
+              ) {
+                showCodexManualStepPrompt({
+                  task_id: currentTaskIdRef.current,
+                  email: currentTaskEmailRef.current,
+                  reason: eventPayload.reason,
+                  continue_file: eventPayload.continue_file,
+                  cancel_file: eventPayload.cancel_file,
+                  message:
+                    eventPayload.message ||
+                    "已到 Step1 自动执行前的节点。若你已手动完成注册，可点击“手动确认注册完成”继续下一步。",
+                  status: eventPayload.status,
+                });
+                setToast({
+                  message: "已到 Step1 前暂停点，可手动确认后继续下一步",
+                  type: "info",
+                });
+              }
+            } catch {
+              // Ignore non-JSON log lines
+            }
+          }
           if (data.line.includes("wuqi666")) {
             const wuqi: any = JSON.parse(data.line);
 
@@ -381,7 +514,7 @@ export const AutoRegisterPage: React.FC = () => {
                 "acknowledge_grace_period",
                 {
                   workosCursorSessionToken: wuqi.wuqi666 || "",
-                }
+                },
               );
               console.log("Acknowledge结果:", acknowledgeResult);
               setToast({ message: "已确认宽限期免责声明", type: "success" });
@@ -406,7 +539,7 @@ export const AutoRegisterPage: React.FC = () => {
                     resObj.email,
                     res.accessToken,
                     res.refreshToken,
-                    resObj.workos_cursor_session_token || undefined
+                    resObj.workos_cursor_session_token || undefined,
                   );
                   if (result.success) {
                     setToast({ message: "账户添加成功", type: "success" });
@@ -418,7 +551,7 @@ export const AutoRegisterPage: React.FC = () => {
                   setToast({ message: "添加账户失败", type: "error" });
                 }
                 console.log(res.accessToken, "res.accessToken");
-              }
+              },
             );
           }
 
@@ -452,7 +585,9 @@ export const AutoRegisterPage: React.FC = () => {
             try {
               if (isBatchRegistration) {
                 // 批量注册模式：不直接取消全部；等待 Python 输出“停止信号文件...”后再只关闭当前窗口
-                console.log("⏳ 批量注册：检测到保持运行状态，等待停止信号文件行再关闭当前窗口");
+                console.log(
+                  "⏳ 批量注册：检测到保持运行状态，等待停止信号文件行再关闭当前窗口",
+                );
               } else {
                 // 单个注册模式：正常等待用户确认
                 const confirmed = await confirm(
@@ -460,7 +595,7 @@ export const AutoRegisterPage: React.FC = () => {
                   {
                     title: "程序将保持运行状态",
                     kind: "info",
-                  }
+                  },
                 );
 
                 if (confirmed) {
@@ -487,7 +622,7 @@ export const AutoRegisterPage: React.FC = () => {
             const match = data.line.match(/stop_([^\\\/\s]+)\.txt/);
             const taskId = match?.[1]?.trim();
             console.log("🔍 收到停止信号 - task_id:", taskId);
-            
+
             if (taskId && !cancelledStopTaskIdsRef.current.has(taskId)) {
               cancelledStopTaskIdsRef.current.add(taskId);
               try {
@@ -509,7 +644,7 @@ export const AutoRegisterPage: React.FC = () => {
           console.log("更新输出，当前行数:", realtimeOutputRef.current.length);
 
           console.log("触发状态更新");
-        }
+        },
       );
 
       // 监听验证码请求
@@ -526,7 +661,7 @@ export const AutoRegisterPage: React.FC = () => {
               const taskId = payload.task_id || null;
               const email = payload.email || null;
               console.log(
-                `📝 保存任务信息 - Task ID: ${taskId}, Email: ${email}`
+                `📝 保存任务信息 - Task ID: ${taskId}, Email: ${email}`,
               );
               setCurrentTaskId(taskId);
               setCurrentTaskEmail(email);
@@ -535,7 +670,7 @@ export const AutoRegisterPage: React.FC = () => {
             setShowVerificationModal(true);
             setToast({ message: "请输入验证码", type: "info" });
           }
-        }
+        },
       );
 
       // 监听验证码获取超时
@@ -550,7 +685,7 @@ export const AutoRegisterPage: React.FC = () => {
             const taskId = payload.task_id || null;
             const email = payload.email || null;
             console.log(
-              `📝 保存任务信息 - Task ID: ${taskId}, Email: ${email}`
+              `📝 保存任务信息 - Task ID: ${taskId}, Email: ${email}`,
             );
             setCurrentTaskId(taskId);
             setCurrentTaskEmail(email);
@@ -563,7 +698,7 @@ export const AutoRegisterPage: React.FC = () => {
             }`,
             type: "info",
           });
-        }
+        },
       );
 
       // 监听自动获取的验证码
@@ -574,7 +709,7 @@ export const AutoRegisterPage: React.FC = () => {
           console.log("🎯 收到自动获取的验证码:", code);
           setVerificationCode(code);
           setToast({ message: `自动获取验证码成功: ${code}`, type: "success" });
-        }
+        },
       );
 
       // 监听验证码获取失败
@@ -584,7 +719,7 @@ export const AutoRegisterPage: React.FC = () => {
           const error = event.payload;
           console.log("❌ 自动获取验证码失败:", error);
           setToast({ message: `自动获取验证码失败: ${error}`, type: "error" });
-        }
+        },
       );
 
       // 监听需要手动输入验证码
@@ -599,7 +734,7 @@ export const AutoRegisterPage: React.FC = () => {
             const taskId = payload.task_id || null;
             const email = payload.email || null;
             console.log(
-              `📝 保存任务信息 - Task ID: ${taskId}, Email: ${email}`
+              `📝 保存任务信息 - Task ID: ${taskId}, Email: ${email}`,
             );
             setCurrentTaskId(taskId);
             setCurrentTaskEmail(email);
@@ -612,10 +747,42 @@ export const AutoRegisterPage: React.FC = () => {
             }`,
             type: "info",
           });
-        }
+        },
       );
 
       console.log("事件监听器设置完成");
+
+      const unlistenBatchProgress = await listen(
+        "batch-registration-progress",
+        (event: any) => {
+          if (!isBatchRegisteringRef.current) {
+            return;
+          }
+          updateBatchRegistrationProgress(
+            (event.payload || {}) as BatchProgressEventPayload,
+          );
+        },
+      );
+
+      const unlistenCodexManualStep = await listen(
+        "codex-manual-step-required",
+        (event: any) => {
+          if (!isRegisteringRef.current) {
+            return;
+          }
+          const payload = (event.payload || {}) as CodexManualActionPayload;
+          if (payload.reason !== "codex_manual_confirm_registration_complete") {
+            return;
+          }
+          showCodexManualStepPrompt(payload);
+          setToast({
+            message:
+              payload.message ||
+              "已到 Step1 自动执行前的节点，可手动确认后继续下一步",
+            type: "info",
+          });
+        },
+      );
 
       return () => {
         unlistenOutput();
@@ -624,6 +791,8 @@ export const AutoRegisterPage: React.FC = () => {
         unlistenCodeFailed();
         unlistenManualInput();
         unlistenVerificationTimeout();
+        unlistenBatchProgress();
+        unlistenCodexManualStep();
       };
     };
 
@@ -650,12 +819,16 @@ export const AutoRegisterPage: React.FC = () => {
           stage: payload.stage || "downloading",
           message: payload.message || "正在下载 xray...",
           percent:
-            typeof payload.percent === "number" && Number.isFinite(payload.percent)
+            typeof payload.percent === "number" &&
+            Number.isFinite(payload.percent)
               ? payload.percent
               : null,
           receivedBytes:
-            typeof payload.receivedBytes === "number" ? payload.receivedBytes : 0,
-          totalBytes: typeof payload.totalBytes === "number" ? payload.totalBytes : null,
+            typeof payload.receivedBytes === "number"
+              ? payload.receivedBytes
+              : 0,
+          totalBytes:
+            typeof payload.totalBytes === "number" ? payload.totalBytes : null,
         });
       });
     };
@@ -733,7 +906,7 @@ export const AutoRegisterPage: React.FC = () => {
   // 清空 Tempmail 邮箱
   const clearTempmailInbox = async (
     email: string,
-    pin?: string
+    pin?: string,
   ): Promise<boolean> => {
     try {
       console.log(`🗑️ 清空 Tempmail 邮箱: ${email}`);
@@ -744,7 +917,7 @@ export const AutoRegisterPage: React.FC = () => {
         {
           email: email,
           pin: pin || null,
-        }
+        },
       );
 
       if (result.success) {
@@ -763,7 +936,11 @@ export const AutoRegisterPage: React.FC = () => {
   const parseCodexCdpOverrides = (): CodexCdpOverrides | null => {
     try {
       const parsed = JSON.parse(codexCdpOverridesJson) as unknown;
-      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      if (
+        typeof parsed !== "object" ||
+        parsed === null ||
+        Array.isArray(parsed)
+      ) {
         throw new Error("顶层必须是 JSON 对象");
       }
 
@@ -846,11 +1023,110 @@ export const AutoRegisterPage: React.FC = () => {
     setIsLoading(false);
     setIsRegistering(false);
     isBatchRegisteringRef.current = false;
+    batchProgressEntriesRef.current.clear();
     cancelledStopTaskIdsRef.current.clear();
     setShowVerificationModal(false);
+    setCodexManualAction(null);
+    setManualActionLoading(false);
     setVerificationCode("");
     setCurrentTaskId(null);
     setCurrentTaskEmail(null);
+  };
+
+  const updateBatchRegistrationProgress = (
+    payload: BatchProgressEventPayload,
+  ) => {
+    const total = payload.total ?? batchCountRef.current;
+    const completed = payload.completed ?? 0;
+    const succeeded = payload.succeeded ?? 0;
+    const failed = payload.failed ?? 0;
+    const index = payload.index ?? 0;
+    const email = payload.email || `任务 ${index + 1}`;
+    const detail = payload.success
+      ? `✅[${index + 1}] ${email}: 成功`
+      : `❌[${index + 1}] ${email}: ${payload.error || "失败"}`;
+
+    batchProgressEntriesRef.current.set(index, detail);
+    const details = Array.from(batchProgressEntriesRef.current.entries())
+      .sort((a, b) => a[0] - b[0])
+      .map(([, value]) => value);
+
+    setRegistrationResult({
+      success: failed === 0 || completed < total,
+      message:
+        completed >= total
+          ? `批量注册完成：${succeeded}/${total} 成功`
+          : `批量注册进行中：${completed}/${total} 已完成`,
+      details,
+    });
+  };
+
+  const handleCodexManualStepAction = async (
+    action: "manual_confirm_complete" | "continue",
+  ) => {
+    const taskId = resolveCodexManualTaskId(codexManualAction);
+    if (!taskId) {
+      setToast({ message: "当前任务信息缺失，无法继续", type: "error" });
+      return;
+    }
+
+    try {
+      setManualActionLoading(true);
+      await invoke("signal_registration_continue", {
+        taskId,
+        action,
+      });
+      setCodexManualAction(null);
+      if (currentTaskIdRef.current === taskId) {
+        setCurrentTaskId(null);
+        setCurrentTaskEmail(null);
+      }
+      setToast({
+        message:
+          action === "manual_confirm_complete"
+            ? "已发送手动确认完成信号，继续执行当前任务"
+            : "已发送继续执行信号",
+        type: "success",
+      });
+    } catch (error) {
+      setToast({ message: `发送继续信号失败: ${error}`, type: "error" });
+    } finally {
+      setManualActionLoading(false);
+    }
+  };
+
+  const handleCodexManualStepForceClose = async () => {
+    const taskId = resolveCodexManualTaskId(codexManualAction);
+
+    try {
+      setManualActionLoading(true);
+      if (taskId) {
+        await invoke("cancel_registration_task", {
+          taskId,
+        });
+      } else {
+        await invoke("cancel_registration");
+      }
+
+      setCodexManualAction(null);
+      if (taskId && currentTaskIdRef.current === taskId) {
+        setCurrentTaskId(null);
+        setCurrentTaskEmail(null);
+      }
+      setToast({
+        message: taskId
+          ? "已强制关闭当前任务，当前账号会按失败处理。"
+          : "已停止当前注册流程。",
+        type: "info",
+      });
+    } catch (error) {
+      setToast({
+        message: `强制关闭当前任务失败: ${error}`,
+        type: "error",
+      });
+    } finally {
+      setManualActionLoading(false);
+    }
   };
 
   const handleVerificationCodeSubmit = async () => {
@@ -862,7 +1138,7 @@ export const AutoRegisterPage: React.FC = () => {
     try {
       // 提交验证码时传递 task_id（如果有的话）
       console.log(
-        `📤 提交验证码 - Task ID: ${currentTaskId}, Email: ${currentTaskEmail}, Code: ${verificationCode}`
+        `📤 提交验证码 - Task ID: ${currentTaskId}, Email: ${currentTaskEmail}, Code: ${verificationCode}`,
       );
       await invoke("submit_verification_code", {
         code: verificationCode,
@@ -930,7 +1206,8 @@ export const AutoRegisterPage: React.FC = () => {
           ? emailType
           : "self_hosted";
       setEmailType(codexEmailType);
-      const nextUrl = getCodexSelfHostedMailUrl() ?? getSelfHostedMailUrl() ?? "";
+      const nextUrl =
+        getCodexSelfHostedMailUrl() ?? getSelfHostedMailUrl() ?? "";
       const nextHdr =
         getCodexSelfHostedMailHeadersJson() ??
         getSelfHostedMailHeadersJson() ??
@@ -989,7 +1266,8 @@ export const AutoRegisterPage: React.FC = () => {
     const url = selfHostedMailUrl.trim();
     const path = selfHostedMailResponsePath.trim();
     const clearUrl = selfHostedMailClearUrl.trim();
-    const clearMethod = selfHostedMailClearMethod.trim().toUpperCase() || "DELETE";
+    const clearMethod =
+      selfHostedMailClearMethod.trim().toUpperCase() || "DELETE";
 
     if (isCodexProvider) {
       setCachedCodexSelfHostedMailUrl(url);
@@ -997,7 +1275,9 @@ export const AutoRegisterPage: React.FC = () => {
       setCachedCodexSelfHostedMailResponsePath(path);
       setCachedCodexSelfHostedMailClearEnabled(selfHostedMailClearEnabled);
       setCachedCodexSelfHostedMailClearUrl(clearUrl);
-      setCachedCodexSelfHostedMailClearHeadersJson(selfHostedMailClearHeadersJson);
+      setCachedCodexSelfHostedMailClearHeadersJson(
+        selfHostedMailClearHeadersJson,
+      );
       setCachedCodexSelfHostedMailClearMethod(clearMethod);
       return;
     }
@@ -1013,8 +1293,15 @@ export const AutoRegisterPage: React.FC = () => {
 
   const validateForm = (): boolean => {
     // 自定义邮箱需要验证邮箱地址
-    if (isCodexProvider && emailType !== "self_hosted" && emailType !== "custom") {
-      setToast({ message: "Codex 当前仅支持自建邮箱 API 或手动验证码", type: "error" });
+    if (
+      isCodexProvider &&
+      emailType !== "self_hosted" &&
+      emailType !== "custom"
+    ) {
+      setToast({
+        message: "Codex 当前仅支持自建邮箱 API 或手动验证码",
+        type: "error",
+      });
       return false;
     }
 
@@ -1057,12 +1344,11 @@ export const AutoRegisterPage: React.FC = () => {
       }
       try {
         const h = JSON.parse(selfHostedMailHeadersJson) as unknown;
-        if (
-          typeof h !== "object" ||
-          h === null ||
-          Array.isArray(h)
-        ) {
-          setToast({ message: "Headers 须为 JSON 对象（键值对）", type: "error" });
+        if (typeof h !== "object" || h === null || Array.isArray(h)) {
+          setToast({
+            message: "Headers 须为 JSON 对象（键值对）",
+            type: "error",
+          });
           return false;
         }
       } catch {
@@ -1082,17 +1368,25 @@ export const AutoRegisterPage: React.FC = () => {
           return false;
         }
         try {
-          const clearHeaders = JSON.parse(selfHostedMailClearHeadersJson) as unknown;
+          const clearHeaders = JSON.parse(
+            selfHostedMailClearHeadersJson,
+          ) as unknown;
           if (
             typeof clearHeaders !== "object" ||
             clearHeaders === null ||
             Array.isArray(clearHeaders)
           ) {
-            setToast({ message: "清空邮箱 Headers 须为 JSON 对象", type: "error" });
+            setToast({
+              message: "清空邮箱 Headers 须为 JSON 对象",
+              type: "error",
+            });
             return false;
           }
         } catch {
-          setToast({ message: "清空邮箱 Headers 不是合法 JSON", type: "error" });
+          setToast({
+            message: "清空邮箱 Headers 不是合法 JSON",
+            type: "error",
+          });
           return false;
         }
         if (!selfHostedMailClearMethod.trim()) {
@@ -1186,11 +1480,15 @@ export const AutoRegisterPage: React.FC = () => {
       }>("start_vless_proxy", {
         vlessUrl: vlessUrl.trim(),
         httpPort:
-          Number.isInteger(Number(xrayHttpPort)) && xrayHttpPort >= 1 && xrayHttpPort <= 65535
+          Number.isInteger(Number(xrayHttpPort)) &&
+          xrayHttpPort >= 1 &&
+          xrayHttpPort <= 65535
             ? xrayHttpPort
             : 8991,
         socksPort:
-          Number.isInteger(Number(xraySocksPort)) && xraySocksPort >= 1 && xraySocksPort <= 65535
+          Number.isInteger(Number(xraySocksPort)) &&
+          xraySocksPort >= 1 &&
+          xraySocksPort <= 65535
             ? xraySocksPort
             : 1990,
       });
@@ -1207,7 +1505,7 @@ export const AutoRegisterPage: React.FC = () => {
               message: "VLESS 启动完成",
               percent: prev.percent ?? 100,
             }
-          : null
+          : null,
       );
     } catch (error) {
       setVlessRuntimeProxy(null);
@@ -1238,7 +1536,7 @@ export const AutoRegisterPage: React.FC = () => {
               percent: null,
               receivedBytes: 0,
               totalBytes: null,
-            }
+            },
       );
       setToast({ message: "已取消 xray 下载", type: "info" });
     } catch (error) {
@@ -1293,7 +1591,7 @@ export const AutoRegisterPage: React.FC = () => {
 
       const cleared = await clearTempmailInbox(
         tempmailEmail,
-        tempmailPin || undefined
+        tempmailPin || undefined,
       );
       if (runId !== registrationRunIdRef.current) {
         return;
@@ -1313,11 +1611,15 @@ export const AutoRegisterPage: React.FC = () => {
 
     setIsLoading(true);
     setIsRegistering(true);
+    batchProgressEntriesRef.current.clear();
     setRegistrationResult(null);
     cancelledStopTaskIdsRef.current.clear();
     realtimeOutputRef.current = []; // 清空ref
     setRealtimeOutput([]); // 清空之前的输出
-    setToast({ message: `开始注册${activeProviderLabel}账户...`, type: "info" });
+    setToast({
+      message: `开始注册${activeProviderLabel}账户...`,
+      type: "info",
+    });
 
     if (emailType === "self_hosted") {
       persistSelfHostedConfig();
@@ -1329,7 +1631,7 @@ export const AutoRegisterPage: React.FC = () => {
         setToast({ message: "检查银行卡配置格式...", type: "info" });
         try {
           const conversionResult = await invoke<string>(
-            "check_and_convert_bank_card_config"
+            "check_and_convert_bank_card_config",
           );
           console.log("银行卡配置检查结果:", conversionResult);
 
@@ -1373,7 +1675,7 @@ export const AutoRegisterPage: React.FC = () => {
               // 代理配置
               proxy: await buildRuntimeProxyConfig(),
             },
-          }
+          },
         );
       } else if (emailType === "tempmail") {
         // 使用Tempmail临时邮箱注册
@@ -1395,7 +1697,7 @@ export const AutoRegisterPage: React.FC = () => {
             btnIndex: isUsAccount ? 1 : 0,
             cardIndex: enableBankCardBinding ? selectedCardIndex : 0,
             proxy: await buildRuntimeProxyConfig(),
-          }
+          },
         );
       } else if (
         (emailType === "self_hosted" && !isCodexProvider) ||
@@ -1435,7 +1737,7 @@ export const AutoRegisterPage: React.FC = () => {
               {
                 proxy: sharedConfig.proxy,
                 codexCdpOverrides,
-              }
+              },
             )
           : await CursorService.registerWithSelfHostedMailApi(
               form.email,
@@ -1452,7 +1754,7 @@ export const AutoRegisterPage: React.FC = () => {
               enableBankCardBinding,
               skipPhoneVerification,
               enableBankCardBinding ? selectedCardIndex : undefined,
-              sharedConfig
+              sharedConfig,
             );
       } else if (emailType === "outlook" && outlookMode === "default") {
         // 使用Outlook邮箱注册
@@ -1597,7 +1899,7 @@ export const AutoRegisterPage: React.FC = () => {
       emailType === "self_hosted"
     ) {
       const emptyEmails = batchEmails.filter(
-        (email) => !email || !email.includes("@")
+        (email) => !email || !email.includes("@"),
       );
       if (emptyEmails.length > 0) {
         setToast({
@@ -1615,11 +1917,7 @@ export const AutoRegisterPage: React.FC = () => {
       }
       try {
         const h = JSON.parse(selfHostedMailHeadersJson) as unknown;
-        if (
-          typeof h !== "object" ||
-          h === null ||
-          Array.isArray(h)
-        ) {
+        if (typeof h !== "object" || h === null || Array.isArray(h)) {
           setToast({ message: "Headers 须为 JSON 对象", type: "error" });
           return;
         }
@@ -1640,17 +1938,25 @@ export const AutoRegisterPage: React.FC = () => {
           return;
         }
         try {
-          const clearHeaders = JSON.parse(selfHostedMailClearHeadersJson) as unknown;
+          const clearHeaders = JSON.parse(
+            selfHostedMailClearHeadersJson,
+          ) as unknown;
           if (
             typeof clearHeaders !== "object" ||
             clearHeaders === null ||
             Array.isArray(clearHeaders)
           ) {
-            setToast({ message: "清空邮箱 Headers 须为 JSON 对象", type: "error" });
+            setToast({
+              message: "清空邮箱 Headers 须为 JSON 对象",
+              type: "error",
+            });
             return;
           }
         } catch {
-          setToast({ message: "清空邮箱 Headers 不是合法 JSON", type: "error" });
+          setToast({
+            message: "清空邮箱 Headers 不是合法 JSON",
+            type: "error",
+          });
           return;
         }
         if (!selfHostedMailClearMethod.trim()) {
@@ -1701,7 +2007,7 @@ export const AutoRegisterPage: React.FC = () => {
 
       const cleared = await clearTempmailInbox(
         tempmailEmail,
-        tempmailPin || undefined
+        tempmailPin || undefined,
       );
       if (runId !== registrationRunIdRef.current) {
         return;
@@ -1760,6 +2066,11 @@ export const AutoRegisterPage: React.FC = () => {
     cancelledStopTaskIdsRef.current.clear();
     realtimeOutputRef.current = [];
     setRealtimeOutput([]);
+    setRegistrationResult({
+      success: true,
+      message: `批量注册进行中：0/${batchCount} 已完成`,
+      details: [],
+    });
     setToast({
       message: `开始批量注册 ${batchCount} 个账户（${
         useParallelMode ? "并行" : "串行"
@@ -1781,6 +2092,14 @@ export const AutoRegisterPage: React.FC = () => {
         emails,
         firstNames,
         lastNames,
+        ...(!useParallelMode
+          ? {
+              batchDelaySeconds: Math.max(
+                0,
+                Math.floor(batchSerialDelaySeconds),
+              ),
+            }
+          : {}),
         emailType,
         outlookMode: emailType === "outlook" ? outlookMode : undefined,
         tempmailEmail: emailType === "tempmail" ? tempmailEmail : undefined,
@@ -1796,7 +2115,9 @@ export const AutoRegisterPage: React.FC = () => {
         selfHostedMailClearEnabled:
           emailType === "self_hosted" ? selfHostedMailClearEnabled : undefined,
         selfHostedMailClearUrl:
-          emailType === "self_hosted" ? selfHostedMailClearUrl.trim() : undefined,
+          emailType === "self_hosted"
+            ? selfHostedMailClearUrl.trim()
+            : undefined,
         selfHostedMailClearHeadersJson:
           emailType === "self_hosted"
             ? selfHostedMailClearHeadersJson
@@ -1806,8 +2127,12 @@ export const AutoRegisterPage: React.FC = () => {
             ? selfHostedMailClearMethod.trim().toUpperCase() || "DELETE"
             : undefined,
         useIncognito,
-        enableBankCardBinding: isCodexProvider ? undefined : enableBankCardBinding,
-        skipPhoneVerification: isCodexProvider ? undefined : skipPhoneVerification,
+        enableBankCardBinding: isCodexProvider
+          ? undefined
+          : enableBankCardBinding,
+        skipPhoneVerification: isCodexProvider
+          ? undefined
+          : skipPhoneVerification,
         selectedCardIndices:
           !isCodexProvider && enableBankCardBinding
             ? selectedBatchCardIndices.slice(0, batchCount)
@@ -1845,10 +2170,10 @@ export const AutoRegisterPage: React.FC = () => {
           message: `批量注册完成：${result.succeeded}/${result.total} 成功`,
           details: [
             ...result.results.map(
-              (r: any) => `✅ [${r.index + 1}] ${r.email}: 成功`
+              (r: any) => `✅ [${r.index + 1}] ${r.email}: 成功`,
             ),
             ...result.errors.map(
-              (e: any) => `❌ [${e.index + 1}] ${e.email}: ${e.error}`
+              (e: any) => `❌ [${e.index + 1}] ${e.email}: ${e.error}`,
             ),
           ],
         });
@@ -1926,7 +2251,7 @@ export const AutoRegisterPage: React.FC = () => {
 
       // 同样处理批量注册的选中索引
       const validBatchIndices = selectedBatchCardIndices.filter(
-        (index) => index < configList.cards.length
+        (index) => index < configList.cards.length,
       );
       if (validBatchIndices.length === 0 && configList.cards.length > 0) {
         setSelectedBatchCardIndices([0]);
@@ -1993,9 +2318,8 @@ export const AutoRegisterPage: React.FC = () => {
     }
 
     try {
-      const result = await CursorService.setCustomBrowserPath(
-        customBrowserPath
-      );
+      const result =
+        await CursorService.setCustomBrowserPath(customBrowserPath);
       setCurrentBrowserPath(customBrowserPath);
       setToast({
         message: "浏览器路径设置成功",
@@ -2083,6 +2407,13 @@ export const AutoRegisterPage: React.FC = () => {
       setUseParallelMode(cachedUseParallelMode);
     }
 
+    const cachedBatchSerialDelaySeconds = getBatchSerialDelaySeconds();
+    if (cachedBatchSerialDelaySeconds !== null) {
+      setBatchSerialDelaySeconds(
+        Math.max(0, Math.floor(cachedBatchSerialDelaySeconds)),
+      );
+    }
+
     const cursorUrl = getSelfHostedMailUrl();
     const cursorHdr = getSelfHostedMailHeadersJson();
     const cursorPath = getSelfHostedMailResponsePath();
@@ -2100,27 +2431,34 @@ export const AutoRegisterPage: React.FC = () => {
     const codexCdpJson = getCodexCdpOverridesJson();
 
     const activeProvider = cachedProvider ?? "cursor";
-    const activeUrl = activeProvider === "codex" ? codexUrl ?? cursorUrl : cursorUrl;
-    const activeHdr = activeProvider === "codex" ? codexHdr ?? cursorHdr : cursorHdr;
+    const activeUrl =
+      activeProvider === "codex" ? (codexUrl ?? cursorUrl) : cursorUrl;
+    const activeHdr =
+      activeProvider === "codex" ? (codexHdr ?? cursorHdr) : cursorHdr;
     const activePath =
-      activeProvider === "codex" ? codexPath ?? cursorPath : cursorPath;
+      activeProvider === "codex" ? (codexPath ?? cursorPath) : cursorPath;
     const activeClearEnabled =
       activeProvider === "codex"
-        ? codexClearEnabled ?? cursorClearEnabled
+        ? (codexClearEnabled ?? cursorClearEnabled)
         : cursorClearEnabled;
     const activeClearUrl =
-      activeProvider === "codex" ? codexClearUrl ?? cursorClearUrl : cursorClearUrl;
+      activeProvider === "codex"
+        ? (codexClearUrl ?? cursorClearUrl)
+        : cursorClearUrl;
     const activeClearHdr =
-      activeProvider === "codex" ? codexClearHdr ?? cursorClearHdr : cursorClearHdr;
+      activeProvider === "codex"
+        ? (codexClearHdr ?? cursorClearHdr)
+        : cursorClearHdr;
     const activeClearMethod =
       activeProvider === "codex"
-        ? codexClearMethod ?? cursorClearMethod
+        ? (codexClearMethod ?? cursorClearMethod)
         : cursorClearMethod;
 
     if (activeUrl) setSelfHostedMailUrl(activeUrl);
     if (activeHdr) setSelfHostedMailHeadersJson(activeHdr);
     if (activePath) setSelfHostedMailResponsePath(activePath);
-    if (activeClearEnabled !== null) setSelfHostedMailClearEnabled(activeClearEnabled);
+    if (activeClearEnabled !== null)
+      setSelfHostedMailClearEnabled(activeClearEnabled);
     if (activeClearUrl) setSelfHostedMailClearUrl(activeClearUrl);
     if (activeClearHdr) setSelfHostedMailClearHeadersJson(activeClearHdr);
     if (activeClearMethod) setSelfHostedMailClearMethod(activeClearMethod);
@@ -2152,7 +2490,7 @@ export const AutoRegisterPage: React.FC = () => {
 
   return (
     <div className="max-w-4xl mx-auto">
-      <div className="surface-primary rounded-2xl shadow">
+      <div className="shadow surface-primary rounded-2xl">
         <div className="px-4 py-5 sm:p-6">
           <div className="flex items-center justify-between mb-6">
             <div>
@@ -2160,23 +2498,23 @@ export const AutoRegisterPage: React.FC = () => {
                 📝 {activeProviderLabel} 自动注册
               </h3>
               <div className="flex gap-4 mt-3">
-                <label className="flex items-center text-sm text-slate-700 dark:text-slate-300 cursor-pointer">
+                <label className="flex items-center text-sm cursor-pointer text-slate-700 dark:text-slate-300">
                   <input
                     type="radio"
                     name="registration-provider"
                     checked={registrationProvider === "cursor"}
                     onChange={() => switchRegistrationProvider("cursor")}
-                    className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-900"
+                    className="w-4 h-4 text-blue-600 rounded border-slate-300 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-900"
                   />
                   <span className="ml-2">Cursor</span>
                 </label>
-                <label className="flex items-center text-sm text-slate-700 dark:text-slate-300 cursor-pointer">
+                <label className="flex items-center text-sm cursor-pointer text-slate-700 dark:text-slate-300">
                   <input
                     type="radio"
                     name="registration-provider"
                     checked={registrationProvider === "codex"}
                     onChange={() => switchRegistrationProvider("codex")}
-                    className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-900"
+                    className="w-4 h-4 text-blue-600 rounded border-slate-300 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-900"
                   />
                   <span className="ml-2">Codex</span>
                 </label>
@@ -2210,7 +2548,7 @@ export const AutoRegisterPage: React.FC = () => {
                 type="checkbox"
                 checked={useRandomInfo}
                 onChange={(e) => setUseRandomInfo(e.target.checked)}
-                className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-900"
+                className="w-4 h-4 text-blue-600 rounded border-slate-300 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-900"
               />
               <label
                 htmlFor="use-random"
@@ -2237,7 +2575,7 @@ export const AutoRegisterPage: React.FC = () => {
                     handleInputChange("firstName", e.target.value)
                   }
                   disabled={useRandomInfo}
-                  className="block w-full mt-1 border-slate-300 dark:border-slate-700 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 sm:text-sm disabled:bg-slate-100 dark:disabled:bg-slate-800"
+                  className="block w-full mt-1 rounded-md shadow-sm border-slate-300 dark:border-slate-700 focus:ring-blue-500 focus:border-blue-500 sm:text-sm disabled:bg-slate-100 dark:disabled:bg-slate-800"
                   placeholder="请输入名字"
                 />
               </div>
@@ -2257,7 +2595,7 @@ export const AutoRegisterPage: React.FC = () => {
                     handleInputChange("lastName", e.target.value)
                   }
                   disabled={useRandomInfo}
-                  className="block w-full mt-1 border-slate-300 dark:border-slate-700 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 sm:text-sm disabled:bg-slate-100 dark:disabled:bg-slate-800"
+                  className="block w-full mt-1 rounded-md shadow-sm border-slate-300 dark:border-slate-700 focus:ring-blue-500 focus:border-blue-500 sm:text-sm disabled:bg-slate-100 dark:disabled:bg-slate-800"
                   placeholder="请输入姓氏"
                 />
               </div>
@@ -2268,9 +2606,10 @@ export const AutoRegisterPage: React.FC = () => {
                 </label>
                 <div className="space-y-2">
                   {isCodexProvider && (
-                    <div className="p-3 rounded-md bg-slate-50 border border-slate-200">
+                    <div className="p-3 border rounded-md bg-slate-50 border-slate-200">
                       <p className="text-sm text-slate-700">
-                        Codex 支持两种验证码模式：自建邮箱 API 自动获取，或自定义邮箱手动输入验证码。
+                        Codex 支持两种验证码模式：自建邮箱 API
+                        自动获取，或自定义邮箱手动输入验证码。
                       </p>
                     </div>
                   )}
@@ -2288,7 +2627,7 @@ export const AutoRegisterPage: React.FC = () => {
                             setEmailType(newType);
                             setCachedEmailType(newType);
                           }}
-                          className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-900"
+                          className="w-4 h-4 text-blue-600 rounded border-slate-300 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-900"
                         />
                         <label
                           htmlFor="email-custom"
@@ -2309,7 +2648,7 @@ export const AutoRegisterPage: React.FC = () => {
                             setEmailType(newType);
                             setCachedEmailType(newType);
                           }}
-                          className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-900"
+                          className="w-4 h-4 text-blue-600 rounded border-slate-300 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-900"
                         />
                         <label
                           htmlFor="email-cloudflare"
@@ -2330,7 +2669,7 @@ export const AutoRegisterPage: React.FC = () => {
                             setEmailType(newType);
                             setCachedEmailType(newType);
                           }}
-                          className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-900"
+                          className="w-4 h-4 text-blue-600 rounded border-slate-300 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-900"
                         />
                         <label
                           htmlFor="email-tempmail"
@@ -2353,7 +2692,7 @@ export const AutoRegisterPage: React.FC = () => {
                           const newType = e.target.value as EmailType;
                           setEmailType(newType);
                         }}
-                        className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-900"
+                        className="w-4 h-4 text-blue-600 rounded border-slate-300 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-900"
                       />
                       <label
                         htmlFor="email-custom-codex"
@@ -2377,7 +2716,7 @@ export const AutoRegisterPage: React.FC = () => {
                           setCachedEmailType(newType);
                         }
                       }}
-                      className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-900"
+                      className="w-4 h-4 text-blue-600 rounded border-slate-300 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-900"
                     />
                     <label
                       htmlFor="email-self-hosted"
@@ -2398,7 +2737,7 @@ export const AutoRegisterPage: React.FC = () => {
                           e.target.value as EmailType
                         )
                       }
-                      className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-900"
+                      className="w-4 h-4 text-blue-600 rounded border-slate-300 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-900"
                     />
                     <label
                       htmlFor="email-outlook"
@@ -2427,7 +2766,7 @@ export const AutoRegisterPage: React.FC = () => {
                     id="email"
                     value={form.email}
                     onChange={(e) => handleInputChange("email", e.target.value)}
-                    className="field-input mt-1 sm:text-sm"
+                    className="mt-1 field-input sm:text-sm"
                     placeholder={
                       emailType === "tempmail" || emailType === "self_hosted"
                         ? "请输入用于注册的真实邮箱地址"
@@ -2439,7 +2778,7 @@ export const AutoRegisterPage: React.FC = () => {
 
               {emailType === "cloudflare_temp" && (
                 <div className="sm:col-span-2">
-                  <div className="status-info rounded-md p-3">
+                  <div className="p-3 rounded-md status-info">
                     <p className="text-sm text-blue-700">
                       📧 将自动创建临时邮箱并获取验证码，无需手动输入
                     </p>
@@ -2449,7 +2788,7 @@ export const AutoRegisterPage: React.FC = () => {
 
               {emailType === "tempmail" && (
                 <div className="space-y-4 sm:col-span-2">
-                  <div className="status-success rounded-md p-3">
+                  <div className="p-3 rounded-md status-success">
                     <p className="text-sm text-green-700">
                       📧 配置Tempmail临时邮箱，将自动获取转发到临时邮箱的验证码
                     </p>
@@ -2474,7 +2813,7 @@ export const AutoRegisterPage: React.FC = () => {
                         setTempmailEmail(value);
                         setCachedTempmailEmail(value);
                       }}
-                      className="field-input mt-1 sm:text-sm"
+                      className="mt-1 field-input sm:text-sm"
                       placeholder="请输入tempmail邮箱地址，如：xxx@mailto.plus"
                     />
                   </div>
@@ -2484,7 +2823,10 @@ export const AutoRegisterPage: React.FC = () => {
                       htmlFor="tempmail-pin"
                       className="block text-sm font-medium text-slate-700 dark:text-slate-300"
                     >
-                      PIN码 <span className="text-slate-400 dark:text-slate-500">(可选)</span>
+                      PIN码{" "}
+                      <span className="text-slate-400 dark:text-slate-500">
+                        (可选)
+                      </span>
                     </label>
                     <input
                       type="text"
@@ -2495,7 +2837,7 @@ export const AutoRegisterPage: React.FC = () => {
                         setTempmailPin(value);
                         setPinCode(value);
                       }}
-                      className="field-input mt-1 sm:text-sm"
+                      className="mt-1 field-input sm:text-sm"
                       placeholder="请输入PIN码（如果有的话）"
                     />
                   </div>
@@ -2504,14 +2846,19 @@ export const AutoRegisterPage: React.FC = () => {
 
               {emailType === "self_hosted" && (
                 <div className="space-y-4 sm:col-span-2">
-                  <div className="status-warning rounded-md p-3">
+                  <div className="p-3 rounded-md status-warning">
                     <p className="text-sm text-amber-900">
                       {activeSelfHostedDescription}
                     </p>
                     <p className="mt-2 text-xs text-amber-800">
                       响应路径示例：指向字符串字段，如{" "}
-                      <code className="rounded bg-amber-100 px-1 dark:bg-amber-500/15 dark:text-amber-100">results[0].raw</code>{" "}
-                      或 <code className="rounded bg-amber-100 px-1 dark:bg-amber-500/15 dark:text-amber-100">results.0.raw</code>
+                      <code className="px-1 rounded bg-amber-100 dark:bg-amber-500/15 dark:text-amber-100">
+                        results[0].raw
+                      </code>{" "}
+                      或{" "}
+                      <code className="px-1 rounded bg-amber-100 dark:bg-amber-500/15 dark:text-amber-100">
+                        results.0.raw
+                      </code>
                       （与 JSON 结构一致即可）。
                     </p>
                   </div>
@@ -2536,7 +2883,7 @@ export const AutoRegisterPage: React.FC = () => {
                           setCachedSelfHostedMailUrl(v.trim());
                         }
                       }}
-                      className="field-input mt-1 font-mono text-sm"
+                      className="mt-1 font-mono text-sm field-input"
                       placeholder="https://example.com/api/mails?limit=1&offset=0"
                     />
                   </div>
@@ -2546,7 +2893,8 @@ export const AutoRegisterPage: React.FC = () => {
                       htmlFor="self-hosted-headers"
                       className="block text-sm font-medium text-slate-700 dark:text-slate-300"
                     >
-                      请求 Headers（JSON 对象）<span className="text-red-500">*</span>
+                      请求 Headers（JSON 对象）
+                      <span className="text-red-500">*</span>
                     </label>
                     <textarea
                       id="self-hosted-headers"
@@ -2561,7 +2909,7 @@ export const AutoRegisterPage: React.FC = () => {
                           setCachedSelfHostedMailHeadersJson(v);
                         }
                       }}
-                      className="field-input mt-1 font-mono text-xs"
+                      className="mt-1 font-mono text-xs field-input"
                       spellCheck={false}
                     />
                   </div>
@@ -2586,12 +2934,12 @@ export const AutoRegisterPage: React.FC = () => {
                           setCachedSelfHostedMailResponsePath(v.trim());
                         }
                       }}
-                      className="field-input mt-1 font-mono text-sm"
+                      className="mt-1 font-mono text-sm field-input"
                       placeholder="results[0].raw"
                     />
                   </div>
 
-                  <div className="surface-secondary border-subtle space-y-4 rounded-md border p-3">
+                  <div className="p-3 space-y-4 border rounded-md surface-secondary border-subtle">
                     <div className="flex items-center">
                       <input
                         id="self-hosted-clear-enabled"
@@ -2606,7 +2954,7 @@ export const AutoRegisterPage: React.FC = () => {
                             setCachedSelfHostedMailClearEnabled(checked);
                           }
                         }}
-                        className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-900"
+                        className="w-4 h-4 text-blue-600 rounded border-slate-300 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-900"
                       />
                       <label
                         htmlFor="self-hosted-clear-enabled"
@@ -2638,7 +2986,7 @@ export const AutoRegisterPage: React.FC = () => {
                                 setCachedSelfHostedMailClearUrl(v.trim());
                               }
                             }}
-                            className="field-input mt-1 font-mono text-sm"
+                            className="mt-1 font-mono text-sm field-input"
                             placeholder="https://example.com/api/mails/clear"
                           />
                         </div>
@@ -2648,7 +2996,8 @@ export const AutoRegisterPage: React.FC = () => {
                             htmlFor="self-hosted-clear-method"
                             className="block text-sm font-medium text-slate-700 dark:text-slate-300"
                           >
-                            清空请求 Method <span className="text-red-500">*</span>
+                            清空请求 Method{" "}
+                            <span className="text-red-500">*</span>
                           </label>
                           <input
                             type="text"
@@ -2663,7 +3012,7 @@ export const AutoRegisterPage: React.FC = () => {
                                 setCachedSelfHostedMailClearMethod(v);
                               }
                             }}
-                            className="field-input mt-1 font-mono text-sm"
+                            className="mt-1 font-mono text-sm field-input"
                             placeholder="DELETE"
                           />
                         </div>
@@ -2673,7 +3022,8 @@ export const AutoRegisterPage: React.FC = () => {
                             htmlFor="self-hosted-clear-headers"
                             className="block text-sm font-medium text-slate-700 dark:text-slate-300"
                           >
-                            清空请求 Headers（JSON 对象）<span className="text-red-500">*</span>
+                            清空请求 Headers（JSON 对象）
+                            <span className="text-red-500">*</span>
                           </label>
                           <textarea
                             id="self-hosted-clear-headers"
@@ -2688,7 +3038,7 @@ export const AutoRegisterPage: React.FC = () => {
                                 setCachedSelfHostedMailClearHeadersJson(v);
                               }
                             }}
-                            className="field-input mt-1 font-mono text-xs"
+                            className="mt-1 font-mono text-xs field-input"
                             spellCheck={false}
                           />
                         </div>
@@ -2700,15 +3050,18 @@ export const AutoRegisterPage: React.FC = () => {
 
               {isCodexProvider && (
                 <div className="space-y-4 sm:col-span-2">
-                  <div className="status-info rounded-md p-3">
+                  <div className="p-3 rounded-md status-info">
                     <p className="text-sm text-blue-800">
                       Codex CDP 参数可在这里直接覆盖。`incognito` 与
-                      `custom-config-json` 仍由程序固定控制，这里只开放 URL、步骤、超时和附加脚本。
+                      `custom-config-json` 仍由程序固定控制，这里只开放
+                      URL、步骤、超时和附加脚本。
                     </p>
                     <p className="mt-2 text-xs text-blue-700">
                       支持的步骤格式：`click` / `input`。其中 `input.value`
-                      可以继续使用 `__AUTO__`、`__RANDOM_EN_NAME__`、`__REGISTER_EMAIL__`、`__ACCESS_PASSWORD__`
-                      这类占位符。点击步骤支持 `waitForLoad: true`，用于点击后等待页面加载完成。
+                      可以继续使用
+                      `__AUTO__`、`__RANDOM_EN_NAME__`、`__REGISTER_EMAIL__`、`__ACCESS_PASSWORD__`
+                      这类占位符。点击步骤支持 `waitForLoad:
+                      true`，用于点击后等待页面加载完成。
                     </p>
                   </div>
 
@@ -2724,9 +3077,11 @@ export const AutoRegisterPage: React.FC = () => {
                         variant="secondary"
                         size="sm"
                         onClick={() => {
-                          setCodexCdpOverridesJson(DEFAULT_CODEX_CDP_OVERRIDES_JSON);
+                          setCodexCdpOverridesJson(
+                            DEFAULT_CODEX_CDP_OVERRIDES_JSON,
+                          );
                           setCachedCodexCdpOverridesJson(
-                            DEFAULT_CODEX_CDP_OVERRIDES_JSON
+                            DEFAULT_CODEX_CDP_OVERRIDES_JSON,
                           );
                         }}
                       >
@@ -2742,7 +3097,7 @@ export const AutoRegisterPage: React.FC = () => {
                         setCodexCdpOverridesJson(value);
                         setCachedCodexCdpOverridesJson(value);
                       }}
-                      className="field-input mt-1 font-mono text-xs"
+                      className="mt-1 font-mono text-xs field-input"
                       spellCheck={false}
                     />
                   </div>
@@ -2766,10 +3121,10 @@ export const AutoRegisterPage: React.FC = () => {
                           checked={outlookMode === "default"}
                           onChange={(e) =>
                             setOutlookMode(
-                              e.target.value as "default" | "token"
+                              e.target.value as "default" | "token",
                             )
                           }
-                          className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-900"
+                          className="w-4 h-4 text-blue-600 rounded border-slate-300 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-900"
                         />
                         <label
                           htmlFor="outlook-default"
@@ -2787,10 +3142,10 @@ export const AutoRegisterPage: React.FC = () => {
                           checked={outlookMode === "token"}
                           onChange={(e) =>
                             setOutlookMode(
-                              e.target.value as "default" | "token"
+                              e.target.value as "default" | "token",
                             )
                           }
-                          className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-900"
+                          className="w-4 h-4 text-blue-600 rounded border-slate-300 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-900"
                           disabled
                         />
                         <label
@@ -2818,12 +3173,12 @@ export const AutoRegisterPage: React.FC = () => {
                         value={outlookEmail}
                         onChange={(e) => setOutlookEmail(e.target.value)}
                         placeholder="example@outlook.com"
-                        className="field-input mt-1"
+                        className="mt-1 field-input"
                       />
-                      <p className="text-muted mt-1 text-sm">
+                      <p className="mt-1 text-sm text-muted">
                         请输入你的@outlook.com邮箱地址
                       </p>
-                      <div className="status-success mt-3 rounded-md p-3">
+                      <div className="p-3 mt-3 rounded-md status-success">
                         <p className="text-sm text-green-700">
                           📧 将自动获取该邮箱的验证码，无需手动输入
                         </p>
@@ -2840,7 +3195,7 @@ export const AutoRegisterPage: React.FC = () => {
                       <textarea
                         rows={3}
                         placeholder="TODO: 令牌模式待实现"
-                        className="field-input mt-1"
+                        className="mt-1 field-input"
                         disabled
                       />
                     </div>
@@ -2859,7 +3214,7 @@ export const AutoRegisterPage: React.FC = () => {
                       setUseIncognito(value);
                       setCachedUseIncognito(value);
                     }}
-                    className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-900"
+                    className="w-4 h-4 text-blue-600 rounded border-slate-300 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-900"
                   />
                   <label
                     htmlFor="use-incognito"
@@ -2868,7 +3223,7 @@ export const AutoRegisterPage: React.FC = () => {
                     使用无痕模式（推荐）
                   </label>
                 </div>
-                <p className="text-muted mt-1 text-xs">
+                <p className="mt-1 text-xs text-muted">
                   无痕模式可以避免浏览器缓存和历史记录影响注册过程
                 </p>
               </div>
@@ -2886,7 +3241,7 @@ export const AutoRegisterPage: React.FC = () => {
                           setEnableBankCardBinding(value);
                           setCachedEnableBankCardBinding(value);
                         }}
-                        className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-900"
+                        className="w-4 h-4 text-blue-600 rounded border-slate-300 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-900"
                       />
                       <label
                         htmlFor="enable-bank-card-binding"
@@ -2895,231 +3250,242 @@ export const AutoRegisterPage: React.FC = () => {
                         自动绑定银行卡（默认）
                       </label>
                     </div>
-                    <p className="text-muted mt-1 text-xs">
+                    <p className="mt-1 text-xs text-muted">
                       勾选后将自动执行银行卡绑定流程，取消勾选则跳过银行卡绑定
                     </p>
                   </div>
 
                   {/* 订阅配置选项 */}
                   <div className="sm:col-span-2">
-                    <div className="rounded-md border border-purple-200 bg-purple-50 p-4 dark:border-purple-500/25 dark:bg-purple-500/10">
+                    <div className="p-4 border border-purple-200 rounded-md bg-purple-50 dark:border-purple-500/25 dark:bg-purple-500/10">
                       <h4 className="mb-3 text-sm font-medium text-purple-800 dark:text-purple-100">
-                    💎 订阅配置（绑卡相关）
-                  </h4>
+                        💎 订阅配置（绑卡相关）
+                      </h4>
 
-                  {/* 订阅层级选择 */}
-                  <div className="mb-4">
-                    <label className="block mb-2 text-sm font-medium text-slate-700 dark:text-slate-300">
-                      订阅层级
-                    </label>
-                    <div className="space-y-2">
-                      <div className="flex items-center">
-                        <input
-                          id="tier-pro"
-                          name="subscription-tier"
-                          type="radio"
-                          value="pro"
-                          checked={subscriptionTier === "pro"}
-                          onChange={(e) =>
-                            setSubscriptionTier(
-                              e.target.value as "pro" | "pro_plus" | "ultra"
-                            )
-                          }
-                          className="h-4 w-4 rounded border-slate-300 text-purple-600 focus:ring-purple-500 dark:border-slate-600 dark:bg-slate-900"
-                        />
-                        <label
-                          htmlFor="tier-pro"
-                          className="ml-2 text-sm text-slate-700 dark:text-slate-300"
-                        >
-                          Pro 试用版（默认）
+                      {/* 订阅层级选择 */}
+                      <div className="mb-4">
+                        <label className="block mb-2 text-sm font-medium text-slate-700 dark:text-slate-300">
+                          订阅层级
                         </label>
+                        <div className="space-y-2">
+                          <div className="flex items-center">
+                            <input
+                              id="tier-pro"
+                              name="subscription-tier"
+                              type="radio"
+                              value="pro"
+                              checked={subscriptionTier === "pro"}
+                              onChange={(e) =>
+                                setSubscriptionTier(
+                                  e.target.value as
+                                    | "pro"
+                                    | "pro_plus"
+                                    | "ultra",
+                                )
+                              }
+                              className="w-4 h-4 text-purple-600 rounded border-slate-300 focus:ring-purple-500 dark:border-slate-600 dark:bg-slate-900"
+                            />
+                            <label
+                              htmlFor="tier-pro"
+                              className="ml-2 text-sm text-slate-700 dark:text-slate-300"
+                            >
+                              Pro 试用版（默认）
+                            </label>
+                          </div>
+                          <div className="flex items-center">
+                            <input
+                              id="tier-pro-plus"
+                              name="subscription-tier"
+                              type="radio"
+                              value="pro_plus"
+                              checked={subscriptionTier === "pro_plus"}
+                              onChange={(e) =>
+                                setSubscriptionTier(
+                                  e.target.value as
+                                    | "pro"
+                                    | "pro_plus"
+                                    | "ultra",
+                                )
+                              }
+                              className="w-4 h-4 text-purple-600 rounded border-slate-300 focus:ring-purple-500 dark:border-slate-600 dark:bg-slate-900"
+                            />
+                            <label
+                              htmlFor="tier-pro-plus"
+                              className="ml-2 text-sm text-slate-700 dark:text-slate-300"
+                            >
+                              Pro Plus 试用版
+                            </label>
+                          </div>
+                          <div className="flex items-center">
+                            <input
+                              id="tier-ultra"
+                              name="subscription-tier"
+                              type="radio"
+                              value="ultra"
+                              checked={subscriptionTier === "ultra"}
+                              onChange={(e) =>
+                                setSubscriptionTier(
+                                  e.target.value as
+                                    | "pro"
+                                    | "pro_plus"
+                                    | "ultra",
+                                )
+                              }
+                              className="w-4 h-4 text-purple-600 rounded border-slate-300 focus:ring-purple-500 dark:border-slate-600 dark:bg-slate-900"
+                            />
+                            <label
+                              htmlFor="tier-ultra"
+                              className="ml-2 text-sm text-slate-700 dark:text-slate-300"
+                            >
+                              Ultra 版本
+                            </label>
+                          </div>
+                        </div>
                       </div>
-                      <div className="flex items-center">
-                        <input
-                          id="tier-pro-plus"
-                          name="subscription-tier"
-                          type="radio"
-                          value="pro_plus"
-                          checked={subscriptionTier === "pro_plus"}
-                          onChange={(e) =>
-                            setSubscriptionTier(
-                              e.target.value as "pro" | "pro_plus" | "ultra"
-                            )
-                          }
-                          className="h-4 w-4 rounded border-slate-300 text-purple-600 focus:ring-purple-500 dark:border-slate-600 dark:bg-slate-900"
-                        />
-                        <label
-                          htmlFor="tier-pro-plus"
-                          className="ml-2 text-sm text-slate-700 dark:text-slate-300"
-                        >
-                          Pro Plus 试用版
-                        </label>
+
+                      {/* 自动续费选项 */}
+                      <div className="mb-4">
+                        <div className="flex items-center">
+                          <input
+                            id="allow-automatic-payment"
+                            type="checkbox"
+                            checked={allowAutomaticPayment}
+                            onChange={(e) =>
+                              setAllowAutomaticPayment(e.target.checked)
+                            }
+                            className="w-4 h-4 text-purple-600 rounded border-slate-300 dark:border-slate-700 focus:ring-purple-500"
+                          />
+                          <label
+                            htmlFor="allow-automatic-payment"
+                            className="ml-2 text-sm text-slate-700 dark:text-slate-300"
+                          >
+                            允许自动续费
+                          </label>
+                        </div>
+                        <p className="mt-1 text-xs text-muted">
+                          勾选后将允许订阅到期时自动续费
+                        </p>
                       </div>
-                      <div className="flex items-center">
-                        <input
-                          id="tier-ultra"
-                          name="subscription-tier"
-                          type="radio"
-                          value="ultra"
-                          checked={subscriptionTier === "ultra"}
-                          onChange={(e) =>
-                            setSubscriptionTier(
-                              e.target.value as "pro" | "pro_plus" | "ultra"
-                            )
-                          }
-                          className="h-4 w-4 rounded border-slate-300 text-purple-600 focus:ring-purple-500 dark:border-slate-600 dark:bg-slate-900"
-                        />
-                        <label
-                          htmlFor="tier-ultra"
-                          className="ml-2 text-sm text-slate-700 dark:text-slate-300"
-                        >
-                          Ultra 版本
+
+                      {/* 试用选项 */}
+                      <div className="mb-4">
+                        <div className="flex items-center">
+                          <input
+                            id="allow-trial"
+                            type="checkbox"
+                            checked={allowTrial}
+                            onChange={(e) => setAllowTrial(e.target.checked)}
+                            className="w-4 h-4 text-purple-600 rounded border-slate-300 dark:border-slate-700 focus:ring-purple-500"
+                          />
+                          <label
+                            htmlFor="allow-trial"
+                            className="ml-2 text-sm text-slate-700 dark:text-slate-300"
+                          >
+                            开启试用
+                          </label>
+                        </div>
+                        <p className="mt-1 text-xs text-muted">
+                          勾选后将开启试用期，取消勾选则直接付费订阅
+                        </p>
+                      </div>
+
+                      {/* 绑卡方式选择 */}
+                      <div>
+                        <label className="block mb-2 text-sm font-medium text-slate-700 dark:text-slate-300">
+                          绑卡方式
                         </label>
+                        <div className="space-y-2">
+                          <div className="flex items-center">
+                            <input
+                              id="use-api-bind-card"
+                              name="bind-card-method"
+                              type="radio"
+                              value={1}
+                              checked={useApiForBindCard === 1}
+                              onChange={() => setUseApiForBindCard(1)}
+                              className="w-4 h-4 text-purple-600 rounded border-slate-300 focus:ring-purple-500 dark:border-slate-600 dark:bg-slate-900"
+                            />
+                            <label
+                              htmlFor="use-api-bind-card"
+                              className="ml-2 text-sm text-slate-700 dark:text-slate-300"
+                            >
+                              使用接口获取绑卡地址（推荐）
+                            </label>
+                          </div>
+                          <div className="flex items-center">
+                            <input
+                              id="use-simulate-bind-card"
+                              name="bind-card-method"
+                              type="radio"
+                              value={2}
+                              checked={useApiForBindCard === 2}
+                              onChange={() => setUseApiForBindCard(2)}
+                              className="w-4 h-4 text-purple-600 rounded border-slate-300 focus:ring-purple-500 dark:border-slate-600 dark:bg-slate-900"
+                            />
+                            <label
+                              htmlFor="use-simulate-bind-card"
+                              className="ml-2 text-sm text-slate-700 dark:text-slate-300"
+                            >
+                              模拟页面点击获取绑卡地址
+                            </label>
+                          </div>
+                        </div>
+                        <p className="mt-1 text-xs text-muted">
+                          选择获取绑卡地址的方式：接口方式更快更稳定，模拟点击方式更接近真实用户行为
+                        </p>
                       </div>
                     </div>
                   </div>
 
-                  {/* 自动续费选项 */}
-                  <div className="mb-4">
+                  <div className="sm:col-span-2">
                     <div className="flex items-center">
                       <input
-                        id="allow-automatic-payment"
+                        id="is-us-account"
                         type="checkbox"
-                        checked={allowAutomaticPayment}
+                        checked={isUsAccount}
+                        onChange={(e) => setIsUsAccount(e.target.checked)}
+                        className="w-4 h-4 text-blue-600 rounded border-slate-300 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-900"
+                      />
+                      <label
+                        htmlFor="is-us-account"
+                        className="ml-2 text-sm text-slate-700 dark:text-slate-300"
+                      >
+                        注册美国账户
+                      </label>
+                    </div>
+                    <p className="mt-1 text-xs text-muted">
+                      勾选后将选择美国地区的付款方式（按钮索引1），否则使用默认地区（按钮索引0）
+                    </p>
+                  </div>
+
+                  <div className="sm:col-span-2">
+                    <div className="flex items-center">
+                      <input
+                        id="skip-phone-verification"
+                        type="checkbox"
+                        checked={skipPhoneVerification}
                         onChange={(e) =>
-                          setAllowAutomaticPayment(e.target.checked)
+                          setSkipPhoneVerification(e.target.checked)
                         }
-                        className="w-4 h-4 text-purple-600 border-slate-300 dark:border-slate-700 rounded focus:ring-purple-500"
+                        className="w-4 h-4 text-blue-600 rounded border-slate-300 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-900"
                       />
                       <label
-                        htmlFor="allow-automatic-payment"
+                        htmlFor="skip-phone-verification"
                         className="ml-2 text-sm text-slate-700 dark:text-slate-300"
                       >
-                        允许自动续费
+                        跳过手机号验证（实验性功能）
                       </label>
                     </div>
-                    <p className="text-muted mt-1 text-xs">
-                      勾选后将允许订阅到期时自动续费
+                    <p className="mt-1 text-xs text-muted">
+                      启用后将使用验证码登录方式跳过手机号验证，适用于无法接收短信的情况
                     </p>
                   </div>
-
-                  {/* 试用选项 */}
-                  <div className="mb-4">
-                    <div className="flex items-center">
-                      <input
-                        id="allow-trial"
-                        type="checkbox"
-                        checked={allowTrial}
-                        onChange={(e) => setAllowTrial(e.target.checked)}
-                        className="w-4 h-4 text-purple-600 border-slate-300 dark:border-slate-700 rounded focus:ring-purple-500"
-                      />
-                      <label
-                        htmlFor="allow-trial"
-                        className="ml-2 text-sm text-slate-700 dark:text-slate-300"
-                      >
-                        开启试用
-                      </label>
-                    </div>
-                    <p className="text-muted mt-1 text-xs">
-                      勾选后将开启试用期，取消勾选则直接付费订阅
-                    </p>
-                  </div>
-
-                  {/* 绑卡方式选择 */}
-                  <div>
-                    <label className="block mb-2 text-sm font-medium text-slate-700 dark:text-slate-300">
-                      绑卡方式
-                    </label>
-                    <div className="space-y-2">
-                      <div className="flex items-center">
-                        <input
-                          id="use-api-bind-card"
-                          name="bind-card-method"
-                          type="radio"
-                          value={1}
-                          checked={useApiForBindCard === 1}
-                          onChange={() => setUseApiForBindCard(1)}
-                          className="h-4 w-4 rounded border-slate-300 text-purple-600 focus:ring-purple-500 dark:border-slate-600 dark:bg-slate-900"
-                        />
-                        <label
-                          htmlFor="use-api-bind-card"
-                          className="ml-2 text-sm text-slate-700 dark:text-slate-300"
-                        >
-                          使用接口获取绑卡地址（推荐）
-                        </label>
-                      </div>
-                      <div className="flex items-center">
-                        <input
-                          id="use-simulate-bind-card"
-                          name="bind-card-method"
-                          type="radio"
-                          value={2}
-                          checked={useApiForBindCard === 2}
-                          onChange={() => setUseApiForBindCard(2)}
-                          className="h-4 w-4 rounded border-slate-300 text-purple-600 focus:ring-purple-500 dark:border-slate-600 dark:bg-slate-900"
-                        />
-                        <label
-                          htmlFor="use-simulate-bind-card"
-                          className="ml-2 text-sm text-slate-700 dark:text-slate-300"
-                        >
-                          模拟页面点击获取绑卡地址
-                        </label>
-                      </div>
-                    </div>
-                    <p className="text-muted mt-1 text-xs">
-                      选择获取绑卡地址的方式：接口方式更快更稳定，模拟点击方式更接近真实用户行为
-                    </p>
-                  </div>
-                </div>
-              </div>
-
-              <div className="sm:col-span-2">
-                <div className="flex items-center">
-                  <input
-                    id="is-us-account"
-                    type="checkbox"
-                    checked={isUsAccount}
-                    onChange={(e) => setIsUsAccount(e.target.checked)}
-                    className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-900"
-                  />
-                  <label
-                    htmlFor="is-us-account"
-                    className="ml-2 text-sm text-slate-700 dark:text-slate-300"
-                  >
-                    注册美国账户
-                  </label>
-                </div>
-                <p className="text-muted mt-1 text-xs">
-                  勾选后将选择美国地区的付款方式（按钮索引1），否则使用默认地区（按钮索引0）
-                </p>
-              </div>
-
-              <div className="sm:col-span-2">
-                <div className="flex items-center">
-                  <input
-                    id="skip-phone-verification"
-                    type="checkbox"
-                    checked={skipPhoneVerification}
-                    onChange={(e) => setSkipPhoneVerification(e.target.checked)}
-                    className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-900"
-                  />
-                  <label
-                    htmlFor="skip-phone-verification"
-                    className="ml-2 text-sm text-slate-700 dark:text-slate-300"
-                  >
-                    跳过手机号验证（实验性功能）
-                  </label>
-                </div>
-                <p className="text-muted mt-1 text-xs">
-                  启用后将使用验证码登录方式跳过手机号验证，适用于无法接收短信的情况
-                </p>
-              </div>
                 </>
               )}
 
               {/* 代理配置选项 */}
               <div className="sm:col-span-2">
-                <div className="rounded-md border border-orange-200 bg-orange-50 p-4 dark:border-orange-500/25 dark:bg-orange-500/10">
+                <div className="p-4 border border-orange-200 rounded-md bg-orange-50 dark:border-orange-500/25 dark:bg-orange-500/10">
                   <h4 className="mb-3 text-sm font-medium text-orange-800 dark:text-orange-100">
                     🌐 代理配置
                   </h4>
@@ -3135,7 +3501,7 @@ export const AutoRegisterPage: React.FC = () => {
                         type="checkbox"
                         checked={proxyEnabled}
                         onChange={(e) => setProxyEnabled(e.target.checked)}
-                        className="h-4 w-4 rounded border-slate-300 text-orange-600 focus:ring-orange-500 dark:border-slate-600 dark:bg-slate-900"
+                        className="w-4 h-4 text-orange-600 rounded border-slate-300 focus:ring-orange-500 dark:border-slate-600 dark:bg-slate-900"
                       />
                       <label
                         htmlFor="enable-proxy"
@@ -3144,7 +3510,7 @@ export const AutoRegisterPage: React.FC = () => {
                         启用代理
                       </label>
                     </div>
-                    <p className="text-muted mt-1 text-xs">
+                    <p className="mt-1 text-xs text-muted">
                       勾选后将使用代理进行网络连接
                     </p>
                   </div>
@@ -3166,7 +3532,9 @@ export const AutoRegisterPage: React.FC = () => {
                               value="http"
                               checked={proxyType === "http"}
                               onChange={(e) =>
-                                setProxyType(e.target.value as "http" | "socks" | "vless")
+                                setProxyType(
+                                  e.target.value as "http" | "socks" | "vless",
+                                )
                               }
                               className="w-4 h-4 text-orange-600 border-slate-300 dark:border-slate-700 focus:ring-orange-500"
                             />
@@ -3185,7 +3553,9 @@ export const AutoRegisterPage: React.FC = () => {
                               value="socks"
                               checked={proxyType === "socks"}
                               onChange={(e) =>
-                                setProxyType(e.target.value as "http" | "socks" | "vless")
+                                setProxyType(
+                                  e.target.value as "http" | "socks" | "vless",
+                                )
                               }
                               className="w-4 h-4 text-orange-600 border-slate-300 dark:border-slate-700 focus:ring-orange-500"
                             />
@@ -3204,7 +3574,9 @@ export const AutoRegisterPage: React.FC = () => {
                               value="vless"
                               checked={proxyType === "vless"}
                               onChange={(e) =>
-                                setProxyType(e.target.value as "http" | "socks" | "vless")
+                                setProxyType(
+                                  e.target.value as "http" | "socks" | "vless",
+                                )
                               }
                               className="w-4 h-4 text-orange-600 border-slate-300 dark:border-slate-700 focus:ring-orange-500"
                             />
@@ -3233,9 +3605,9 @@ export const AutoRegisterPage: React.FC = () => {
                             value={httpProxy}
                             onChange={(e) => setHttpProxy(e.target.value)}
                             placeholder="127.0.0.1:7890"
-                            className="field-input mt-1 focus:ring-orange-500"
+                            className="mt-1 field-input focus:ring-orange-500"
                           />
-                          <p className="text-muted mt-1 text-xs">
+                          <p className="mt-1 text-xs text-muted">
                             格式：IP:端口 或 域名:端口
                           </p>
                         </div>
@@ -3256,9 +3628,9 @@ export const AutoRegisterPage: React.FC = () => {
                             value={socksProxy}
                             onChange={(e) => setSocksProxy(e.target.value)}
                             placeholder="127.0.0.1:1080"
-                            className="field-input mt-1 focus:ring-orange-500"
+                            className="mt-1 field-input focus:ring-orange-500"
                           />
-                          <p className="text-muted mt-1 text-xs">
+                          <p className="mt-1 text-xs text-muted">
                             格式：IP:端口 或 域名:端口
                           </p>
                         </div>
@@ -3279,10 +3651,11 @@ export const AutoRegisterPage: React.FC = () => {
                               value={vlessUrl}
                               onChange={(e) => setVlessUrl(e.target.value)}
                               placeholder="vless://uuid@host:port?security=reality&..."
-                              className="field-input mt-1 focus:ring-orange-500"
+                              className="mt-1 field-input focus:ring-orange-500"
                             />
-                            <p className="text-muted mt-1 text-xs">
-                              自动用 xray 在本地开启 HTTP/SOCKS 代理端口供浏览器使用
+                            <p className="mt-1 text-xs text-muted">
+                              自动用 xray 在本地开启 HTTP/SOCKS
+                              代理端口供浏览器使用
                             </p>
                           </div>
 
@@ -3299,9 +3672,11 @@ export const AutoRegisterPage: React.FC = () => {
                                 id="xray-http-port"
                                 value={xrayHttpPort}
                                 onChange={(e) =>
-                                  setXrayHttpPort(Number.parseInt(e.target.value || "0", 10))
+                                  setXrayHttpPort(
+                                    Number.parseInt(e.target.value || "0", 10),
+                                  )
                                 }
-                                className="field-input mt-1 focus:ring-orange-500"
+                                className="mt-1 field-input focus:ring-orange-500"
                               />
                             </div>
                             <div>
@@ -3316,14 +3691,17 @@ export const AutoRegisterPage: React.FC = () => {
                                 id="xray-socks-port"
                                 value={xraySocksPort}
                                 onChange={(e) =>
-                                  setXraySocksPort(Number.parseInt(e.target.value || "0", 10))
+                                  setXraySocksPort(
+                                    Number.parseInt(e.target.value || "0", 10),
+                                  )
                                 }
-                                className="field-input mt-1 focus:ring-orange-500"
+                                className="mt-1 field-input focus:ring-orange-500"
                               />
                             </div>
                           </div>
-                          <p className="text-muted text-xs">
-                            端口范围需为 1-65535，超出范围会自动回退到 HTTP 8991 / SOCKS 1990
+                          <p className="text-xs text-muted">
+                            端口范围需为 1-65535，超出范围会自动回退到 HTTP 8991
+                            / SOCKS 1990
                           </p>
 
                           <div className="flex flex-wrap gap-2">
@@ -3331,15 +3709,17 @@ export const AutoRegisterPage: React.FC = () => {
                               type="button"
                               onClick={testAndStartVlessProxy}
                               disabled={isTestingVlessProxy}
-                              className="rounded-md border border-orange-300 bg-orange-100 px-3 py-1 text-xs text-orange-700 hover:bg-orange-200 disabled:cursor-not-allowed disabled:opacity-60 focus:outline-none focus:ring-2 focus:ring-orange-500 dark:border-orange-500/30 dark:bg-orange-500/15 dark:text-orange-200 dark:hover:bg-orange-500/25"
+                              className="px-3 py-1 text-xs text-orange-700 bg-orange-100 border border-orange-300 rounded-md hover:bg-orange-200 disabled:cursor-not-allowed disabled:opacity-60 focus:outline-none focus:ring-2 focus:ring-orange-500 dark:border-orange-500/30 dark:bg-orange-500/15 dark:text-orange-200 dark:hover:bg-orange-500/25"
                             >
-                              {isTestingVlessProxy ? "⏳ 启动中..." : "🚀 手动启动测试"}
+                              {isTestingVlessProxy
+                                ? "⏳ 启动中..."
+                                : "🚀 手动启动测试"}
                             </button>
                             {isTestingVlessProxy && (
                               <button
                                 type="button"
                                 onClick={cancelVlessDownload}
-                                className="rounded-md border border-rose-300 bg-rose-100 px-3 py-1 text-xs text-rose-700 hover:bg-rose-200 focus:outline-none focus:ring-2 focus:ring-rose-500 dark:border-rose-500/30 dark:bg-rose-500/15 dark:text-rose-200 dark:hover:bg-rose-500/25"
+                                className="px-3 py-1 text-xs border rounded-md border-rose-300 bg-rose-100 text-rose-700 hover:bg-rose-200 focus:outline-none focus:ring-2 focus:ring-rose-500 dark:border-rose-500/30 dark:bg-rose-500/15 dark:text-rose-200 dark:hover:bg-rose-500/25"
                               >
                                 🛑 取消下载
                               </button>
@@ -3350,10 +3730,10 @@ export const AutoRegisterPage: React.FC = () => {
                                 copyText(
                                   vlessRuntimeProxy?.httpProxy ||
                                     `127.0.0.1:${xrayHttpPort}`,
-                                  "HTTP 代理地址"
+                                  "HTTP 代理地址",
                                 )
                               }
-                              className="rounded-md border border-slate-300 bg-white px-3 py-1 text-xs text-slate-700 hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-orange-500 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+                              className="px-3 py-1 text-xs bg-white border rounded-md border-slate-300 text-slate-700 hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-orange-500 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
                             >
                               复制 HTTP 地址
                             </button>
@@ -3363,10 +3743,10 @@ export const AutoRegisterPage: React.FC = () => {
                                 copyText(
                                   vlessRuntimeProxy?.socksProxy ||
                                     `127.0.0.1:${xraySocksPort}`,
-                                  "SOCKS 代理地址"
+                                  "SOCKS 代理地址",
                                 )
                               }
-                              className="rounded-md border border-slate-300 bg-white px-3 py-1 text-xs text-slate-700 hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-orange-500 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+                              className="px-3 py-1 text-xs bg-white border rounded-md border-slate-300 text-slate-700 hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-orange-500 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
                             >
                               复制 SOCKS 地址
                             </button>
@@ -3376,18 +3756,23 @@ export const AutoRegisterPage: React.FC = () => {
                             <div className="space-y-1">
                               <p className="text-xs text-slate-600 dark:text-slate-300">
                                 {vlessDownloadProgress.message}
-                                {typeof vlessDownloadProgress.percent === "number"
+                                {typeof vlessDownloadProgress.percent ===
+                                "number"
                                   ? ` (${vlessDownloadProgress.percent.toFixed(1)}%)`
                                   : ""}
                               </p>
-                              {typeof vlessDownloadProgress.percent === "number" && (
-                                <div className="h-2 w-full rounded bg-slate-200 dark:bg-slate-700">
+                              {typeof vlessDownloadProgress.percent ===
+                                "number" && (
+                                <div className="w-full h-2 rounded bg-slate-200 dark:bg-slate-700">
                                   <div
-                                    className="h-2 rounded bg-orange-500 transition-all"
+                                    className="h-2 transition-all bg-orange-500 rounded"
                                     style={{
                                       width: `${Math.max(
                                         0,
-                                        Math.min(100, vlessDownloadProgress.percent)
+                                        Math.min(
+                                          100,
+                                          vlessDownloadProgress.percent,
+                                        ),
                                       )}%`,
                                     }}
                                   />
@@ -3397,10 +3782,9 @@ export const AutoRegisterPage: React.FC = () => {
                           )}
 
                           {vlessRuntimeProxy && (
-                            <div className="rounded-md border border-emerald-200 bg-emerald-50 p-2 text-xs text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-200">
-                              当前可用：HTTP `{vlessRuntimeProxy.httpProxy}` / SOCKS `{
-                                vlessRuntimeProxy.socksProxy
-                              }`
+                            <div className="p-2 text-xs border rounded-md border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-200">
+                              当前可用：HTTP `{vlessRuntimeProxy.httpProxy}` /
+                              SOCKS `{vlessRuntimeProxy.socksProxy}`
                             </div>
                           )}
                         </div>
@@ -3420,9 +3804,9 @@ export const AutoRegisterPage: React.FC = () => {
                           value={noProxy}
                           onChange={(e) => setNoProxy(e.target.value)}
                           placeholder="localhost,127.0.0.1"
-                          className="field-input mt-1 focus:ring-orange-500"
+                          className="mt-1 field-input focus:ring-orange-500"
                         />
-                        <p className="text-muted mt-1 text-xs">
+                        <p className="mt-1 text-xs text-muted">
                           不使用代理的地址列表，用逗号分隔
                         </p>
                       </div>
@@ -3440,7 +3824,7 @@ export const AutoRegisterPage: React.FC = () => {
                                   kind: "warning",
                                   cancelLabel: "取消",
                                   okLabel: "确定",
-                                }
+                                },
                               );
                               if (confirmed) {
                                 resetProxyConfig();
@@ -3457,7 +3841,7 @@ export const AutoRegisterPage: React.FC = () => {
                               });
                             }
                           }}
-                          className="rounded-md border border-orange-300 bg-orange-100 px-3 py-1 text-xs text-orange-700 hover:bg-orange-200 focus:outline-none focus:ring-2 focus:ring-orange-500 dark:border-orange-500/30 dark:bg-orange-500/15 dark:text-orange-200 dark:hover:bg-orange-500/25"
+                          className="px-3 py-1 text-xs text-orange-700 bg-orange-100 border border-orange-300 rounded-md hover:bg-orange-200 focus:outline-none focus:ring-2 focus:ring-orange-500 dark:border-orange-500/30 dark:bg-orange-500/15 dark:text-orange-200 dark:hover:bg-orange-500/25"
                         >
                           🔄 重置配置
                         </button>
@@ -3483,7 +3867,7 @@ export const AutoRegisterPage: React.FC = () => {
                       handleInputChange("password", e.target.value)
                     }
                     disabled={useRandomInfo}
-                    className="field-input pr-10 sm:text-sm disabled:bg-slate-100 dark:disabled:bg-slate-800"
+                    className="pr-10 field-input sm:text-sm disabled:bg-slate-100 dark:disabled:bg-slate-800"
                     placeholder="请输入密码（至少8位）"
                   />
                   <button
@@ -3493,7 +3877,7 @@ export const AutoRegisterPage: React.FC = () => {
                   >
                     {showPassword ? (
                       <svg
-                        className="h-5 w-5 text-slate-400 dark:text-slate-500"
+                        className="w-5 h-5 text-slate-400 dark:text-slate-500"
                         fill="none"
                         stroke="currentColor"
                         viewBox="0 0 24 24"
@@ -3507,7 +3891,7 @@ export const AutoRegisterPage: React.FC = () => {
                       </svg>
                     ) : (
                       <svg
-                        className="h-5 w-5 text-slate-400 dark:text-slate-500"
+                        className="w-5 h-5 text-slate-400 dark:text-slate-500"
                         fill="none"
                         stroke="currentColor"
                         viewBox="0 0 24 24"
@@ -3533,7 +3917,7 @@ export const AutoRegisterPage: React.FC = () => {
 
             {/* 邮箱配置状态 */}
             {!isCodexProvider && emailConfig && (
-              <div className="status-success rounded-md p-4">
+              <div className="p-4 rounded-md status-success">
                 <div className="flex items-center justify-between">
                   <div>
                     <h5 className="text-sm font-medium text-green-800">
@@ -3561,7 +3945,7 @@ export const AutoRegisterPage: React.FC = () => {
 
             {/* 银行卡配置状态 */}
             {!isCodexProvider && bankCardConfig && (
-              <div className="status-info rounded-md p-4">
+              <div className="p-4 rounded-md status-info">
                 <div className="flex items-center justify-between">
                   <div>
                     <h5 className="text-sm font-medium text-blue-800">
@@ -3572,7 +3956,7 @@ export const AutoRegisterPage: React.FC = () => {
                       {bankCardConfig.cardNumber
                         ? `${bankCardConfig.cardNumber.slice(
                             0,
-                            4
+                            4,
                           )}****${bankCardConfig.cardNumber.slice(-4)}`
                         : "未配置"}{" "}
                       | 持卡人: {bankCardConfig.billingName || "未配置"} | 地址:{" "}
@@ -3591,48 +3975,50 @@ export const AutoRegisterPage: React.FC = () => {
             )}
 
             {/* 银行卡选择（单个注册用） */}
-            {!isCodexProvider && enableBankCardBinding && bankCardList.length > 0 && (
-              <div className="status-info rounded-md p-4">
-                <div className="flex items-center justify-between mb-3">
-                  <h5 className="text-sm font-medium text-blue-800">
-                    💳 选择银行卡（单个注册）
-                  </h5>
-                  <div className="text-xs text-blue-700">
-                    已选：卡片 {selectedCardIndex + 1}
-                  </div>
-                </div>
-                <div className="flex gap-2 overflow-x-auto">
-                  {bankCardList.map((card, index) => (
-                    <div
-                      key={index}
-                      className={`relative flex-shrink-0 p-3 border-2 rounded-md cursor-pointer transition-all ${
-                        selectedCardIndex === index
-                          ? "border-blue-500 bg-blue-50 dark:border-blue-500/40 dark:bg-blue-500/12"
-                          : "surface-elevated border-slate-300 dark:border-slate-700 hover:border-slate-400 dark:hover:border-slate-500"
-                      }`}
-                      onClick={() => handleSingleCardSelection(index)}
-                    >
-                      <div className="text-sm font-medium">
-                        卡片 {index + 1}
-                      </div>
-                      <div className="mt-1 text-xs text-slate-600 dark:text-slate-300">
-                        {card.cardNumber
-                          ? `****${card.cardNumber.slice(-4)}`
-                          : "未设置"}
-                      </div>
-                      {selectedCardIndex === index && (
-                        <div className="absolute text-blue-600 top-1 right-1">
-                          ✓
-                        </div>
-                      )}
+            {!isCodexProvider &&
+              enableBankCardBinding &&
+              bankCardList.length > 0 && (
+                <div className="p-4 rounded-md status-info">
+                  <div className="flex items-center justify-between mb-3">
+                    <h5 className="text-sm font-medium text-blue-800">
+                      💳 选择银行卡（单个注册）
+                    </h5>
+                    <div className="text-xs text-blue-700">
+                      已选：卡片 {selectedCardIndex + 1}
                     </div>
-                  ))}
+                  </div>
+                  <div className="flex gap-2 overflow-x-auto">
+                    {bankCardList.map((card, index) => (
+                      <div
+                        key={index}
+                        className={`relative flex-shrink-0 p-3 border-2 rounded-md cursor-pointer transition-all ${
+                          selectedCardIndex === index
+                            ? "border-blue-500 bg-blue-50 dark:border-blue-500/40 dark:bg-blue-500/12"
+                            : "surface-elevated border-slate-300 dark:border-slate-700 hover:border-slate-400 dark:hover:border-slate-500"
+                        }`}
+                        onClick={() => handleSingleCardSelection(index)}
+                      >
+                        <div className="text-sm font-medium">
+                          卡片 {index + 1}
+                        </div>
+                        <div className="mt-1 text-xs text-slate-600 dark:text-slate-300">
+                          {card.cardNumber
+                            ? `****${card.cardNumber.slice(-4)}`
+                            : "未设置"}
+                        </div>
+                        {selectedCardIndex === index && (
+                          <div className="absolute text-blue-600 top-1 right-1">
+                            ✓
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                  <p className="mt-2 text-xs text-slate-600 dark:text-slate-300">
+                    💡 点击卡片选择，单个注册将使用选中的银行卡
+                  </p>
                 </div>
-                <p className="mt-2 text-xs text-slate-600 dark:text-slate-300">
-                  💡 点击卡片选择，单个注册将使用选中的银行卡
-                </p>
-              </div>
-            )}
+              )}
 
             {/* 操作按钮 */}
             <div className="flex space-x-4">
@@ -3664,7 +4050,7 @@ export const AutoRegisterPage: React.FC = () => {
                 <Button
                   onClick={handleCancelRegistration}
                   variant="secondary"
-                  className="flex items-center border-red-300 text-red-700 hover:bg-red-50 dark:border-red-500/30 dark:text-red-200 dark:hover:bg-red-500/15"
+                  className="flex items-center text-red-700 border-red-300 hover:bg-red-50 dark:border-red-500/30 dark:text-red-200 dark:hover:bg-red-500/15"
                 >
                   ⛔ 停止注册
                 </Button>
@@ -3679,7 +4065,7 @@ export const AutoRegisterPage: React.FC = () => {
               <div className="space-y-4">
                 <div className="flex items-center gap-4">
                   <div className="flex-1">
-                    <label className="text-subtle mb-1 block text-sm">
+                    <label className="block mb-1 text-sm text-subtle">
                       注册数量
                     </label>
                     <input
@@ -3695,12 +4081,12 @@ export const AutoRegisterPage: React.FC = () => {
                       placeholder="输入注册数量 (1-3)"
                       disabled={isLoading}
                     />
-                    <p className="text-muted mt-1 text-xs">
+                    <p className="mt-1 text-xs text-muted">
                       ⚠️ 需要配置相同数量的
                       {!isCodexProvider && "银行卡和"}
-                      {(emailType === "custom" ||
-                        emailType === "tempmail" ||
-                        emailType === "self_hosted")
+                      {emailType === "custom" ||
+                      emailType === "tempmail" ||
+                      emailType === "self_hosted"
                         ? "邮箱"
                         : "注册资源"}
                     </p>
@@ -3716,21 +4102,50 @@ export const AutoRegisterPage: React.FC = () => {
                           setUseParallelMode(value);
                           setCachedUseParallelMode(value);
                         }}
-                        className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-900"
+                        className="w-4 h-4 text-blue-600 rounded border-slate-300 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-900"
                         disabled={isLoading}
                       />
                       <label
                         htmlFor="useParallelMode"
-                        className="text-sm text-slate-700 dark:text-slate-300 cursor-pointer"
+                        className="text-sm cursor-pointer text-slate-700 dark:text-slate-300"
                       >
                         🚀 并行模式（多窗口同时注册，速度更快）
                       </label>
                     </div>
-                    <p className="text-muted mt-1 text-xs">
+                    <p className="mt-1 text-xs text-muted">
                       💡 串行模式：一个接一个注册，更稳定
                       <br />
                       💡 并行模式：每个账户独立窗口，同时注册，速度更快
                     </p>
+                    {!useParallelMode && (
+                      <div className="mt-3">
+                        <label className="block mb-1 text-sm text-subtle">
+                          串行间隔秒数
+                        </label>
+                        <input
+                          type="number"
+                          min="0"
+                          max="600"
+                          step="1"
+                          value={batchSerialDelaySeconds}
+                          onChange={(e) => {
+                            const rawValue = parseInt(e.target.value, 10);
+                            const nextValue = Number.isNaN(rawValue)
+                              ? DEFAULT_BATCH_SERIAL_DELAY_SECONDS
+                              : Math.max(0, Math.min(rawValue, 600));
+                            setBatchSerialDelaySeconds(nextValue);
+                            setCachedBatchSerialDelaySeconds(nextValue);
+                          }}
+                          className="field-input"
+                          placeholder="输入下一个任务前等待的秒数"
+                          disabled={isLoading}
+                        />
+                        <p className="mt-1 text-xs text-muted">
+                          第 1 个任务立即开始，第 2
+                          个起每次都会等待这里设置的秒数后再打开执行。
+                        </p>
+                      </div>
+                    )}
                   </div>
                   <div className="flex-shrink-0 pt-6">
                     <div className="flex items-center gap-2">
@@ -3752,7 +4167,7 @@ export const AutoRegisterPage: React.FC = () => {
                         <Button
                           onClick={handleCancelRegistration}
                           variant="secondary"
-                          className="flex items-center border-red-300 text-red-700 hover:bg-red-50 dark:border-red-500/30 dark:text-red-200 dark:hover:bg-red-500/15"
+                          className="flex items-center text-red-700 border-red-300 hover:bg-red-50 dark:border-red-500/30 dark:text-red-200 dark:hover:bg-red-500/15"
                         >
                           ⛔ 停止注册
                         </Button>
@@ -3780,10 +4195,10 @@ export const AutoRegisterPage: React.FC = () => {
                         </span>
                       )}
                     </label>
-                    <div className="surface-secondary max-h-60 grid grid-cols-1 gap-2 overflow-y-auto rounded-md p-3">
+                    <div className="grid grid-cols-1 gap-2 p-3 overflow-y-auto rounded-md surface-secondary max-h-60">
                       {Array.from({ length: batchCount }).map((_, index) => (
                         <div key={index} className="flex items-center gap-2">
-                          <span className="text-muted w-8 flex-shrink-0 text-xs font-medium">
+                          <span className="flex-shrink-0 w-8 text-xs font-medium text-muted">
                             #{index + 1}
                           </span>
                           <input
@@ -3794,7 +4209,7 @@ export const AutoRegisterPage: React.FC = () => {
                               newEmails[index] = e.target.value;
                               setBatchEmails(newEmails);
                             }}
-                            className="field-input flex-1"
+                            className="flex-1 field-input"
                             placeholder={`请输入第 ${index + 1} 个真实邮箱地址`}
                             disabled={isLoading}
                           />
@@ -3805,8 +4220,9 @@ export const AutoRegisterPage: React.FC = () => {
                 )}
 
                 {/* 邮箱类型提示（需单独说明的类型） */}
-                {(emailType === "cloudflare_temp" || emailType === "outlook") && (
-                  <div className="status-info rounded-md p-3">
+                {(emailType === "cloudflare_temp" ||
+                  emailType === "outlook") && (
+                  <div className="p-3 rounded-md status-info">
                     <p className="text-sm text-blue-700">
                       {emailType === "cloudflare_temp"
                         ? "💡 将自动为每个账号生成独立的临时邮箱"
@@ -3816,53 +4232,96 @@ export const AutoRegisterPage: React.FC = () => {
                 )}
 
                 {/* 银行卡选择（批量注册用） */}
-                {!isCodexProvider && enableBankCardBinding && bankCardList.length > 0 && (
-                  <div className="status-success rounded-md p-4">
-                    <div className="flex items-center justify-between mb-3">
-                      <h5 className="text-sm font-medium text-green-800">
-                        💳 选择银行卡（批量注册）
-                      </h5>
-                      <div className="text-xs text-green-700">
-                        已选 {selectedBatchCardIndices.length}/
-                        {bankCardList.length} 张
-                      </div>
-                    </div>
-                    <div className="flex gap-2 overflow-x-auto">
-                      {bankCardList.map((card, index) => (
-                        <div
-                          key={index}
-                          className={`relative flex-shrink-0 p-3 border-2 rounded-md cursor-pointer transition-all ${
-                            selectedBatchCardIndices.includes(index)
-                              ? "border-green-500 bg-green-50 dark:border-green-500/40 dark:bg-green-500/12"
-                              : "surface-elevated border-slate-300 dark:border-slate-700 hover:border-slate-400 dark:hover:border-slate-500"
-                          }`}
-                          onClick={() => handleBatchCardSelection(index)}
-                        >
-                          <div className="text-sm font-medium">
-                            卡片 {index + 1}
-                          </div>
-                          <div className="mt-1 text-xs text-slate-600 dark:text-slate-300">
-                            {card.cardNumber
-                              ? `****${card.cardNumber.slice(-4)}`
-                              : "未设置"}
-                          </div>
-                          {selectedBatchCardIndices.includes(index) && (
-                            <div className="absolute text-green-600 top-1 right-1">
-                              ✓
-                            </div>
-                          )}
+                {!isCodexProvider &&
+                  enableBankCardBinding &&
+                  bankCardList.length > 0 && (
+                    <div className="p-4 rounded-md status-success">
+                      <div className="flex items-center justify-between mb-3">
+                        <h5 className="text-sm font-medium text-green-800">
+                          💳 选择银行卡（批量注册）
+                        </h5>
+                        <div className="text-xs text-green-700">
+                          已选 {selectedBatchCardIndices.length}/
+                          {bankCardList.length} 张
                         </div>
-                      ))}
+                      </div>
+                      <div className="flex gap-2 overflow-x-auto">
+                        {bankCardList.map((card, index) => (
+                          <div
+                            key={index}
+                            className={`relative flex-shrink-0 p-3 border-2 rounded-md cursor-pointer transition-all ${
+                              selectedBatchCardIndices.includes(index)
+                                ? "border-green-500 bg-green-50 dark:border-green-500/40 dark:bg-green-500/12"
+                                : "surface-elevated border-slate-300 dark:border-slate-700 hover:border-slate-400 dark:hover:border-slate-500"
+                            }`}
+                            onClick={() => handleBatchCardSelection(index)}
+                          >
+                            <div className="text-sm font-medium">
+                              卡片 {index + 1}
+                            </div>
+                            <div className="mt-1 text-xs text-slate-600 dark:text-slate-300">
+                              {card.cardNumber
+                                ? `****${card.cardNumber.slice(-4)}`
+                                : "未设置"}
+                            </div>
+                            {selectedBatchCardIndices.includes(index) && (
+                              <div className="absolute text-green-600 top-1 right-1">
+                                ✓
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                      <p className="mt-2 text-xs text-slate-600 dark:text-slate-300">
+                        💡
+                        点击卡片选择/取消选择，批量注册将按顺序使用选中的银行卡
+                      </p>
                     </div>
-                    <p className="mt-2 text-xs text-slate-600 dark:text-slate-300">
-                      💡 点击卡片选择/取消选择，批量注册将按顺序使用选中的银行卡
-                    </p>
-                  </div>
-                )}
+                  )}
               </div>
             </div>
 
             {/* 注册结果 */}
+            {codexManualAction && !showVerificationModal && (
+              <div className="p-4 border rounded-md shadow-sm border-amber-300 bg-amber-50/95 dark:border-amber-500/40 dark:bg-amber-500/10">
+                <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                  <div className="space-y-2">
+                    <h4 className="text-sm font-semibold text-amber-900 dark:text-amber-100">
+                      Codex 已暂停在 Step1 自动执行前
+                    </h4>
+                    <p className="text-sm text-amber-800 dark:text-amber-100/90">
+                      {codexManualAction.message ||
+                        "如果自动注册没有成功，请先在当前浏览器里手动完成注册，然后点击“手动确认注册完成并执行 Step1”。"}
+                    </p>
+                    <div className="flex flex-wrap gap-3 text-xs text-amber-900/80 dark:text-amber-100/80">
+                      {codexManualAction.email && (
+                        <span className="px-3 py-1 font-mono rounded-full bg-white/70 dark:bg-slate-900/40">
+                          邮箱: {codexManualAction.email}
+                        </span>
+                      )}
+                      {codexManualAction.task_id && (
+                        <span className="px-3 py-1 font-mono rounded-full bg-white/70 dark:bg-slate-900/40">
+                          Task ID: {codexManualAction.task_id}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-3">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        handleCodexManualStepAction("manual_confirm_complete")
+                      }
+                      disabled={manualActionLoading}
+                      className="px-4 py-2 text-sm font-medium text-white border rounded-md border-emerald-500 bg-emerald-600 hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      手动触发 Step1
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {registrationResult && (
               <div
                 className={`rounded-md p-4 ${
@@ -3892,7 +4351,7 @@ export const AutoRegisterPage: React.FC = () => {
                   {registrationResult.message}
                 </p>
                 {registrationResult.accountInfo && (
-                  <div className="surface-elevated mt-3 rounded border p-3">
+                  <div className="p-3 mt-3 border rounded surface-elevated">
                     <h5 className="mb-2 text-sm font-medium text-slate-900 dark:text-slate-100">
                       账户信息：
                     </h5>
@@ -3920,7 +4379,7 @@ export const AutoRegisterPage: React.FC = () => {
                       <h5 className="mb-1 text-sm font-medium text-slate-900 dark:text-slate-100">
                         详细信息：
                       </h5>
-                      <ul className="space-y-1 text-sm text-slate-700 dark:text-slate-300 list-disc list-inside">
+                      <ul className="space-y-1 text-sm list-disc list-inside text-slate-700 dark:text-slate-300">
                         {registrationResult.details.map((detail, index) => (
                           <li key={index}>{detail}</li>
                         ))}
@@ -3940,7 +4399,7 @@ export const AutoRegisterPage: React.FC = () => {
                     </span>
                   )}
                 </h5>
-                <div className="panel-code max-h-64 overflow-y-auto rounded-md p-3">
+                <div className="p-3 overflow-y-auto rounded-md panel-code max-h-64">
                   <div className="space-y-1 font-mono text-xs text-green-400">
                     {Array.from(new Set(realtimeOutput)).map((line, index) => (
                       <div key={index} className="whitespace-pre-wrap">
@@ -3983,12 +4442,12 @@ export const AutoRegisterPage: React.FC = () => {
       {/* 验证码输入弹窗 */}
       {showVerificationModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50">
-          <div className="panel-floating mx-4 w-96 max-w-md rounded-lg p-6">
+          <div className="max-w-md p-6 mx-4 rounded-lg panel-floating w-96">
             <h3 className="mb-4 text-lg font-medium text-slate-900 dark:text-slate-100">
               输入验证码
             </h3>
             {currentTaskEmail && (
-              <div className="status-info mb-3 rounded-md px-3 py-2">
+              <div className="px-3 py-2 mb-3 rounded-md status-info">
                 <p className="text-sm text-blue-800">
                   📧 任务邮箱:{" "}
                   <span className="font-mono font-medium">
@@ -4003,7 +4462,7 @@ export const AutoRegisterPage: React.FC = () => {
                 )}
               </div>
             )}
-            <p className="text-subtle mb-4 text-sm">
+            <p className="mb-4 text-sm text-subtle">
               请检查您的邮箱并输入6位验证码(请确认页面已经在输入验证码页面否则输入无效！)
             </p>
             <input
@@ -4014,7 +4473,7 @@ export const AutoRegisterPage: React.FC = () => {
                 setVerificationCode(value);
               }}
               placeholder="请输入6位验证码"
-              className="field-input w-full text-center text-lg tracking-widest"
+              className="w-full text-lg tracking-widest text-center field-input"
               maxLength={6}
               autoFocus
             />
@@ -4022,7 +4481,7 @@ export const AutoRegisterPage: React.FC = () => {
               <button
                 type="button"
                 onClick={handleCancelRegistration}
-                className="surface-secondary border-subtle rounded-md border px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-200/80 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-500 dark:text-slate-300 dark:hover:bg-slate-700/70"
+                className="px-4 py-2 text-sm font-medium border rounded-md surface-secondary border-subtle text-slate-700 hover:bg-slate-200/80 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-500 dark:text-slate-300 dark:hover:bg-slate-700/70"
               >
                 取消注册
               </button>
@@ -4040,6 +4499,66 @@ export const AutoRegisterPage: React.FC = () => {
       )}
 
       {/* 邮箱配置模态框 */}
+      {false && codexManualAction && !showVerificationModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50">
+          <div className="panel-floating mx-4 w-[30rem] max-w-xl rounded-lg p-6">
+            <h3 className="mb-4 text-lg font-medium text-slate-900 dark:text-slate-100">
+              Codex 手动确认步骤
+            </h3>
+            <div className="px-3 py-2 mb-4 rounded-md status-info">
+              {codexManualAction?.email && (
+                <p className="text-sm text-blue-800">
+                  📧 任务邮箱:{" "}
+                  <span className="font-mono font-medium">
+                    {codexManualAction?.email}
+                  </span>
+                </p>
+              )}
+              {codexManualAction?.task_id && (
+                <p className="mt-1 text-xs text-blue-600">
+                  🆔 任务ID:{" "}
+                  <span className="font-mono">
+                    {codexManualAction?.task_id}
+                  </span>
+                </p>
+              )}
+            </div>
+            <p className="mb-4 text-sm text-subtle">
+              {codexManualAction?.message ||
+                "当前任务需要手动确认后再继续执行。"}
+            </p>
+            <div className="flex flex-wrap justify-end gap-3">
+              {/* <button
+                type="button"
+                onClick={() => handleCodexManualStepAction("continue")}
+                disabled={manualActionLoading}
+                className="px-4 py-2 text-sm font-medium border rounded-md surface-secondary border-subtle text-slate-700 hover:bg-slate-200/80 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-500 disabled:cursor-not-allowed disabled:opacity-50 dark:text-slate-300 dark:hover:bg-slate-700/70"
+              >
+                继续执行
+              </button> */}
+              <button
+                type="button"
+                onClick={handleCodexManualStepForceClose}
+                disabled={manualActionLoading}
+                className="px-4 py-2 text-sm font-medium text-white bg-red-600 border border-red-500 rounded-md hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                强制关闭当前任务
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  handleCodexManualStepAction("manual_confirm_complete")
+                }
+                disabled={manualActionLoading}
+                className="px-4 py-2 text-sm font-medium text-white border rounded-md border-emerald-500 bg-emerald-600 hover:bg-emerald-700 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                手动确认注册完成
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <EmailConfigModal
         isOpen={showEmailConfig}
         onClose={() => setShowEmailConfig(false)}
@@ -4050,7 +4569,7 @@ export const AutoRegisterPage: React.FC = () => {
       {/* 浏览器配置模态框 */}
       {showBrowserConfig && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50">
-          <div className="panel-floating mx-4 w-full max-w-2xl rounded-lg p-6">
+          <div className="w-full max-w-2xl p-6 mx-4 rounded-lg panel-floating">
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-xl font-bold">浏览器路径配置</h2>
               <button
@@ -4063,7 +4582,7 @@ export const AutoRegisterPage: React.FC = () => {
 
             <div className="space-y-6">
               {/* 说明文字 */}
-              <div className="status-info rounded-lg p-4">
+              <div className="p-4 rounded-lg status-info">
                 <h3 className="mb-2 font-medium text-blue-800">
                   🔍 浏览器配置说明
                 </h3>
@@ -4071,15 +4590,17 @@ export const AutoRegisterPage: React.FC = () => {
                   如果默认浏览器路径无法找到或需要使用特定浏览器，可以手动指定浏览器可执行文件路径。
                   <br />
                   例如:{" "}
-                  <code className="rounded bg-blue-100 px-1 text-blue-700 dark:bg-blue-500/15 dark:text-blue-100">
+                  <code className="px-1 text-blue-700 bg-blue-100 rounded dark:bg-blue-500/15 dark:text-blue-100">
                     C:\Program Files\Google\Chrome\Application\chrome.exe
                   </code>
                 </p>
               </div>
 
               {/* 当前状态 */}
-              <div className="surface-secondary rounded-lg p-4">
-                <h3 className="mb-2 font-medium text-slate-800 dark:text-slate-100">📍 当前状态</h3>
+              <div className="p-4 rounded-lg surface-secondary">
+                <h3 className="mb-2 font-medium text-slate-800 dark:text-slate-100">
+                  📍 当前状态
+                </h3>
                 <div className="text-sm text-slate-600 dark:text-slate-300">
                   {currentBrowserPath ? (
                     <div>
@@ -4087,7 +4608,7 @@ export const AutoRegisterPage: React.FC = () => {
                         已设置自定义浏览器路径:
                       </span>
                       <br />
-                      <span className="rounded bg-slate-200 px-1 font-mono text-xs dark:bg-slate-800">
+                      <span className="px-1 font-mono text-xs rounded bg-slate-200 dark:bg-slate-800">
                         {currentBrowserPath}
                       </span>
                     </div>
@@ -4099,7 +4620,9 @@ export const AutoRegisterPage: React.FC = () => {
 
               {/* 路径输入 */}
               <div className="space-y-3">
-                <h3 className="font-medium text-slate-800 dark:text-slate-100">📝 设置浏览器路径</h3>
+                <h3 className="font-medium text-slate-800 dark:text-slate-100">
+                  📝 设置浏览器路径
+                </h3>
                 <div className="space-y-3">
                   <input
                     type="text"
