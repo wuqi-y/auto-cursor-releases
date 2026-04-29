@@ -3,10 +3,13 @@ import time
 import os
 import signal
 import random
+import json
+import subprocess
 from colorama import Fore, Style, init
 import configparser
 from pathlib import Path
 import sys
+from urllib.parse import urlparse
 from config import get_config
 from utils import get_default_browser_path as utils_get_default_browser_path
 
@@ -65,6 +68,95 @@ def signal_handler(signum, frame):
     cleanup_chrome_processes(_translator)
     os._exit(0)
 
+def _navigate_front_window_via_macos_applescript(url):
+    """
+    On macOS incognito mode, CDP can bind to a hidden target.
+    Navigate the front window tab directly via AppleScript.
+    """
+    safe_url = json.dumps(url)
+    script = f"""
+tell application "Google Chrome"
+    activate
+    if (count of windows) is 0 then error "Google Chrome has no open windows"
+    set URL of active tab of front window to {safe_url}
+end tell
+"""
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", script],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+    except Exception as e:
+        print(f"{Fore.YELLOW}⚠️ macOS AppleScript 导航执行失败: {e}{Style.RESET_ALL}")
+        return False
+
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        print(f"{Fore.YELLOW}⚠️ macOS AppleScript 导航失败: {detail}{Style.RESET_ALL}")
+        return False
+
+    print(f"{Fore.CYAN}🧭 通过 macOS 前台窗口标签页直接打开目标 URL{Style.RESET_ALL}")
+    return True
+
+def _rebind_page_to_loaded_url(browser_page, url, timeout_s=8.0):
+    """Rebind CDP page object to the real tab that loaded target URL."""
+    browser = getattr(browser_page, "browser", None)
+    if browser is None:
+        return browser_page
+
+    parsed = urlparse(url)
+    url_candidates = [url]
+    if parsed.scheme and parsed.netloc:
+        url_candidates.append(f"{parsed.scheme}://{parsed.netloc}")
+        url_candidates.append(parsed.netloc)
+
+    end_at = time.time() + max(0.5, timeout_s)
+    while time.time() < end_at:
+        for candidate in url_candidates:
+            try:
+                tabs = browser._get_tabs(url=candidate, tab_type="page", mix=False)
+            except Exception:
+                tabs = []
+            if tabs:
+                tab = tabs[0]
+                try:
+                    setter = getattr(tab, "set", None)
+                    activate = getattr(setter, "activate", None)
+                    if callable(activate):
+                        activate()
+                except Exception:
+                    pass
+                current_url = getattr(tab, "url", "") or candidate
+                print(f"{Fore.CYAN}🔗 CDP 已重新绑定到真实标签页: {current_url}{Style.RESET_ALL}")
+                return tab
+        time.sleep(0.25)
+
+    print(f"{Fore.YELLOW}⚠️ 未找到已加载目标 URL 的真实标签页，继续沿用当前页对象{Style.RESET_ALL}")
+    return browser_page
+
+def _open_primary_flow_page(browser_page, url):
+    """
+    Open URL in visible primary page. On macOS + incognito, prefer AppleScript
+    front-tab navigation to avoid hidden target mismatch.
+    """
+    browser = getattr(browser_page, "browser", None)
+    if sys.platform == "darwin" and browser is not None:
+        is_incognito = False
+        try:
+            is_incognito = bool(getattr(browser, "states", None) and browser.states.is_incognito)
+        except Exception:
+            is_incognito = False
+
+        if is_incognito and _navigate_front_window_via_macos_applescript(url):
+            time.sleep(1.2)
+            return _rebind_page_to_loaded_url(browser_page, url)
+
+    browser_page.get(url)
+    return browser_page
+
 def simulate_human_input(page, url, config, translator=None):
     """Visit URL"""
     if translator:
@@ -75,8 +167,9 @@ def simulate_human_input(page, url, config, translator=None):
     time.sleep(get_random_wait_time(config, 'page_load_wait'))
     
     # Visit target page
-    page.get(url)
+    page = _open_primary_flow_page(page, url)
     time.sleep(get_random_wait_time(config, 'page_load_wait'))
+    return page
 
 def fill_signup_form(page, first_name, last_name, email, config, translator=None):
     """Fill signup form"""
@@ -911,7 +1004,7 @@ def main(email=None, password=None, first_name=None, last_name=None, email_tab=N
             url = "https://authenticator.cursor.sh/sign-up"
         
         # Visit page
-        simulate_human_input(page, url, config, translator)
+        page = simulate_human_input(page, url, config, translator)
         if translator:
             print(f"{Fore.CYAN}🔄 {translator.get('register.waiting_for_page_load')}{Style.RESET_ALL}")
         time.sleep(get_random_wait_time(config, 'page_load_wait'))
