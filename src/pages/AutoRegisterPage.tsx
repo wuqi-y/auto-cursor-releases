@@ -6,15 +6,18 @@ import { LoadingSpinner } from "../components/LoadingSpinner";
 import { Toast } from "../components/Toast";
 import { BankCardConfigModal } from "../components/BankCardConfigModal";
 import { EmailConfigModal } from "../components/EmailConfigModal";
+import { HaozhumaConfigModal } from "../components/HaozhumaConfigModal";
 import { AccountService } from "../services/accountService";
 import { BankCardConfigService } from "../services/bankCardConfigService";
 import { EmailConfigService } from "../services/emailConfigService";
+import { HaozhumaConfigService } from "../services/haozhumaConfigService";
 import { CursorService } from "../services/cursorService";
 import { useProxyStore } from "../stores/proxyStore";
 import { useConfigStore } from "../stores/configStore";
 import type { EmailType, RegistrationProvider } from "../stores/configStore";
 import { BankCardConfig } from "../types/bankCardConfig";
 import { EmailConfig } from "../types/emailConfig";
+import { HaozhumaConfig } from "../types/haozhumaConfig";
 import { base64URLEncode, K, sha256 } from "../utils/cursorToken";
 import { confirm } from "@tauri-apps/plugin-dialog";
 
@@ -326,6 +329,9 @@ export const AutoRegisterPage: React.FC = () => {
   );
   const [showEmailConfig, setShowEmailConfig] = useState(false);
   const [emailConfig, setEmailConfig] = useState<EmailConfig | null>(null);
+  const [showHaozhumaConfig, setShowHaozhumaConfig] = useState(false);
+  const [haozhumaConfig, setHaozhumaConfig] = useState<HaozhumaConfig | null>(null);
+  const [enableHaozhumaAutoPhone, setEnableHaozhumaAutoPhone] = useState(false);
 
   // 浏览器路径配置相关状态
   const [showBrowserConfig, setShowBrowserConfig] = useState(false);
@@ -1674,6 +1680,7 @@ export const AutoRegisterPage: React.FC = () => {
               cardIndex: enableBankCardBinding ? selectedCardIndex : 0, // 添加卡片索引
               // 代理配置
               proxy: await buildRuntimeProxyConfig(),
+              haozhuma: buildRuntimeHaozhumaConfig(),
             },
           },
         );
@@ -1697,6 +1704,7 @@ export const AutoRegisterPage: React.FC = () => {
             btnIndex: isUsAccount ? 1 : 0,
             cardIndex: enableBankCardBinding ? selectedCardIndex : 0,
             proxy: await buildRuntimeProxyConfig(),
+            haozhuma: buildRuntimeHaozhumaConfig(),
           },
         );
       } else if (
@@ -1712,6 +1720,7 @@ export const AutoRegisterPage: React.FC = () => {
           btnIndex: isUsAccount ? 1 : 0,
           cardIndex: enableBankCardBinding ? selectedCardIndex : 0,
           proxy: await buildRuntimeProxyConfig(),
+          haozhuma: buildRuntimeHaozhumaConfig(),
         };
 
         result = isCodexProvider
@@ -1778,6 +1787,7 @@ export const AutoRegisterPage: React.FC = () => {
             cardIndex: enableBankCardBinding ? selectedCardIndex : 0, // 添加卡片索引
             // 代理配置
             proxy: await buildRuntimeProxyConfig(),
+            haozhuma: buildRuntimeHaozhumaConfig(),
           },
         });
       } else {
@@ -1802,6 +1812,7 @@ export const AutoRegisterPage: React.FC = () => {
             cardIndex: enableBankCardBinding ? selectedCardIndex : 0, // 添加卡片索引
             // 代理配置
             proxy: await buildRuntimeProxyConfig(),
+            haozhuma: buildRuntimeHaozhumaConfig(),
           },
         });
       }
@@ -2141,6 +2152,7 @@ export const AutoRegisterPage: React.FC = () => {
           ? {
               proxy: await buildRuntimeProxyConfig(),
               codexCdpOverrides,
+              haozhuma: buildRuntimeHaozhumaConfig(),
             }
           : {
               subscriptionTier: subscriptionTier,
@@ -2149,6 +2161,7 @@ export const AutoRegisterPage: React.FC = () => {
               useApiForBindCard: useApiForBindCard,
               btnIndex: isUsAccount ? 1 : 0,
               proxy: await buildRuntimeProxyConfig(),
+              haozhuma: buildRuntimeHaozhumaConfig(),
             },
         maxConcurrent: batchCount,
       });
@@ -2282,6 +2295,29 @@ export const AutoRegisterPage: React.FC = () => {
     }
   };
 
+  const loadHaozhumaConfig = async () => {
+    try {
+      const config = await HaozhumaConfigService.getHaozhumaConfig();
+      setHaozhumaConfig(config);
+      setEnableHaozhumaAutoPhone(config.enabled);
+    } catch (error) {
+      console.error("加载豪猪配置失败:", error);
+    }
+  };
+
+  const buildRuntimeHaozhumaConfig = (): HaozhumaConfig | undefined => {
+    // 如果豪猪配置还没加载完，避免把 enabled=false 这种“未就绪的 UI 状态”
+    // 透传到 Rust 侧覆盖已持久化的 `haozhuma_config.json`。
+    if (!haozhumaConfig) {
+      return undefined;
+    }
+
+    return {
+      ...haozhumaConfig,
+      enabled: enableHaozhumaAutoPhone,
+    };
+  };
+
   // 浏览器路径管理函数
   const loadBrowserPath = async () => {
     try {
@@ -2358,6 +2394,12 @@ export const AutoRegisterPage: React.FC = () => {
     setToast({ message: "邮箱配置已更新", type: "success" });
   };
 
+  const handleHaozhumaConfigSave = (config: HaozhumaConfig) => {
+    setHaozhumaConfig(config);
+    setEnableHaozhumaAutoPhone(config.enabled);
+    setToast({ message: "豪猪配置已更新", type: "success" });
+  };
+
   // Initialize with random info on component mount
   useEffect(() => {
     if (useRandomInfo) {
@@ -2366,6 +2408,7 @@ export const AutoRegisterPage: React.FC = () => {
     // 加载银行卡配置和邮箱配置
     loadBankCardConfig();
     loadEmailConfig();
+    loadHaozhumaConfig();
     loadBrowserPath();
   }, [useRandomInfo]);
 
@@ -2537,6 +2580,15 @@ export const AutoRegisterPage: React.FC = () => {
                   💳 银行卡配置
                 </Button>
               )}
+              {!isCodexProvider && (
+                <Button
+                  onClick={() => setShowHaozhumaConfig(true)}
+                  variant="secondary"
+                  className="flex items-center"
+                >
+                  📱 豪猪配置
+                </Button>
+              )}
             </div>
           </div>
 
@@ -2557,6 +2609,24 @@ export const AutoRegisterPage: React.FC = () => {
                 使用随机生成的账户信息
               </label>
             </div>
+
+            {!isCodexProvider && (
+              <div className="flex items-center">
+                <input
+                  id="enable-haozhuma-auto-phone"
+                  type="checkbox"
+                  checked={enableHaozhumaAutoPhone}
+                  onChange={(e) => setEnableHaozhumaAutoPhone(e.target.checked)}
+                  className="w-4 h-4 text-blue-600 rounded border-slate-300 focus:ring-blue-500 dark:border-slate-600 dark:bg-slate-900"
+                />
+                <label
+                  htmlFor="enable-haozhuma-auto-phone"
+                  className="block ml-2 text-sm text-slate-900 dark:text-slate-100"
+                >
+                  启用豪猪 API 自动获取并填写手机号
+                </label>
+              </div>
+            )}
 
             {/* 表单 */}
             <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
@@ -3943,6 +4013,32 @@ export const AutoRegisterPage: React.FC = () => {
               </div>
             )}
 
+            {!isCodexProvider && haozhumaConfig && (
+              <div className="p-4 rounded-md status-info">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h5 className="text-sm font-medium text-blue-800">
+                      📱 豪猪配置状态
+                    </h5>
+                    <p className="mt-1 text-sm text-blue-700">
+                      当前开关: {enableHaozhumaAutoPhone ? "已启用" : "未启用"} |
+                      API 域名: {haozhumaConfig.api_domain || "未配置"} | 项目 ID:{" "}
+                      {haozhumaConfig.project_id || "未配置"} | 默认区号:{" "}
+                      {haozhumaConfig.default_country_code || "86"} | 豪猪账号:{" "}
+                      {haozhumaConfig.username || "未配置"}
+                    </p>
+                  </div>
+                  <Button
+                    onClick={() => setShowHaozhumaConfig(true)}
+                    variant="secondary"
+                    size="sm"
+                  >
+                    编辑
+                  </Button>
+                </div>
+              </div>
+            )}
+
             {/* 银行卡配置状态 */}
             {!isCodexProvider && bankCardConfig && (
               <div className="p-4 rounded-md status-info">
@@ -4563,6 +4659,12 @@ export const AutoRegisterPage: React.FC = () => {
         isOpen={showEmailConfig}
         onClose={() => setShowEmailConfig(false)}
         onSave={handleEmailConfigSave}
+      />
+
+      <HaozhumaConfigModal
+        isOpen={showHaozhumaConfig}
+        onClose={() => setShowHaozhumaConfig(false)}
+        onSave={handleHaozhumaConfigSave}
       />
 
       {/* 银行卡配置模态框 */}

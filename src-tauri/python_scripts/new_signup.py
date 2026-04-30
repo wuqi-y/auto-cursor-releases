@@ -10,6 +10,8 @@ import configparser
 from pathlib import Path
 import sys
 from urllib.parse import urlparse
+import re
+import requests
 from config import get_config
 from utils import get_default_browser_path as utils_get_default_browser_path
 
@@ -28,6 +30,607 @@ _translator = None
 
 # Add global variable to track our Chrome processes
 _chrome_process_ids = []
+
+
+def get_haozhuma_runtime_config(custom_config):
+    frontend_haozhuma = (custom_config or {}).get("haozhuma") or {}
+
+    # Fallback: if frontend didn't provide complete config, read from
+    # ~/.auto-cursor-vip/haozhuma_config.json (persistent, not browser localStorage).
+    file_haozhuma = {}
+    try:
+        shared_path = Path.home() / ".auto-cursor-vip" / "haozhuma_config.json"
+        if shared_path.exists():
+            file_haozhuma = json.loads(shared_path.read_text(encoding="utf-8"))
+    except Exception:
+        file_haozhuma = {}
+
+    essential_keys = ["api_domain", "username", "password", "project_id"]
+    frontend_has_essentials = all(
+        str(frontend_haozhuma.get(k) or "").strip() for k in essential_keys
+    )
+
+    # Only trust frontend `enabled` when essentials are present.
+    enabled = (
+        bool(frontend_haozhuma.get("enabled"))
+        if frontend_has_essentials
+        else bool(file_haozhuma.get("enabled"))
+    )
+
+    # Base merge: for each field we prefer non-empty frontend value,
+    # otherwise fallback to file value.
+    haozhuma_config = {**file_haozhuma, **frontend_haozhuma}
+    haozhuma_config["enabled"] = enabled
+
+    fixed_phone = str(haozhuma_config.get("fixed_phone") or "").strip()
+    phone_filters = haozhuma_config.get("phone_filters") or {}
+    retry = haozhuma_config.get("retry") or {}
+
+    return {
+        "enabled": bool(haozhuma_config.get("enabled")),
+        "api_domain": str(haozhuma_config.get("api_domain") or "api.haozhuma.com").strip(),
+        "username": str(haozhuma_config.get("username") or "").strip(),
+        "password": str(haozhuma_config.get("password") or "").strip(),
+        "project_id": str(haozhuma_config.get("project_id") or "").strip(),
+        "default_country_code": str(haozhuma_config.get("default_country_code") or "86").strip(),
+        "fixed_phone": fixed_phone,
+        "phone_filters": {
+            "isp": str(phone_filters.get("isp") or "").strip(),
+            "province": str(phone_filters.get("province") or "").strip(),
+            "ascription": str(phone_filters.get("ascription") or "").strip(),
+            "paragraph": str(phone_filters.get("paragraph") or "").strip(),
+            "exclude": str(phone_filters.get("exclude") or "").strip(),
+            "uid": str(phone_filters.get("uid") or "").strip(),
+            "author": str(phone_filters.get("author") or "").strip(),
+        },
+        "retry": {
+            "max_phone_retry": int(retry.get("max_phone_retry") or 10),
+            "poll_interval_seconds": max(1, int(retry.get("poll_interval_seconds") or 1)),
+            "send_check_timeout_seconds": max(5, int(retry.get("send_check_timeout_seconds") or 30)),
+            "sms_poll_timeout_seconds": max(10, int(retry.get("sms_poll_timeout_seconds") or 90)),
+        },
+    }
+
+
+def _normalize_haozhuma_base_url(api_domain):
+    api_domain = (api_domain or "api.haozhuma.com").strip()
+    if not api_domain.startswith(("http://", "https://")):
+        api_domain = f"https://{api_domain}"
+    return api_domain.rstrip("/")
+
+
+def _parse_haozhuma_response_text(text):
+    text = (text or "").strip()
+    try:
+        payload = json.loads(text)
+        if isinstance(payload, dict):
+            return payload
+    except Exception:
+        pass
+
+    for separator in ("|", ",", ";"):
+        if separator in text:
+            parts = [part.strip() for part in text.split(separator)]
+            return {
+                "raw": text,
+                "parts": parts,
+                "token": parts[1] if len(parts) > 1 else "",
+                "message": parts[-1] if parts else text,
+            }
+
+    return {"raw": text, "message": text}
+
+
+def _extract_haozhuma_token(response_payload):
+    for key in ("token", "Token", "data", "result"):
+        value = response_payload.get(key)
+        if isinstance(value, str) and value and len(value) > 8:
+            return value.strip()
+
+    parts = response_payload.get("parts")
+    if isinstance(parts, list):
+        for part in parts:
+            if isinstance(part, str) and len(part.strip()) > 8:
+                return part.strip()
+    return ""
+
+
+def _extract_phone_number(response_payload):
+    for key in ("phone", "mobile", "phone_number", "number"):
+        value = response_payload.get(key)
+        if isinstance(value, str):
+            digits = re.sub(r"\D", "", value)
+            if len(digits) >= 6:
+                return digits
+
+    parts = response_payload.get("parts")
+    if isinstance(parts, list):
+        for part in parts:
+            digits = re.sub(r"\D", "", str(part))
+            if len(digits) >= 6:
+                return digits
+
+    digits = re.sub(r"\D", "", response_payload.get("raw", ""))
+    return digits if len(digits) >= 6 else ""
+
+
+def _extract_sms_code(response_payload):
+    candidates = []
+    for key in ("code", "sms", "message", "msg", "raw", "result"):
+        value = response_payload.get(key)
+        if isinstance(value, str):
+            candidates.append(value)
+
+    parts = response_payload.get("parts")
+    if isinstance(parts, list):
+        candidates.extend(str(part) for part in parts)
+
+    for text in candidates:
+        match = re.search(r"\b(\d{4,8})\b", text)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def _haozhuma_request(api_domain, params, timeout=15):
+    base_url = _normalize_haozhuma_base_url(api_domain)
+    request_url = f"{base_url}/sms/"
+    response = requests.get(request_url, params=params, timeout=timeout)
+    response.raise_for_status()
+    return _parse_haozhuma_response_text(response.text)
+
+
+def haozhuma_login(haozhuma_config):
+    payload = _haozhuma_request(
+        haozhuma_config["api_domain"],
+        {
+            "api": "login",
+            "user": haozhuma_config["username"],
+            "pass": haozhuma_config["password"],
+        },
+    )
+    token = _extract_haozhuma_token(payload)
+    if not token:
+        raise RuntimeError(f"豪猪登录失败: {payload.get('raw') or payload}")
+    return token
+
+
+def haozhuma_get_phone(haozhuma_config, token):
+    params = {
+        "api": "getPhone",
+        "token": token,
+        "sid": haozhuma_config["project_id"],
+    }
+    filters = haozhuma_config["phone_filters"]
+    if filters["isp"]:
+        params["isp"] = filters["isp"]
+    if filters["province"]:
+        params["Province"] = filters["province"]
+    if filters["ascription"]:
+        params["ascription"] = filters["ascription"]
+    if filters["paragraph"]:
+        params["paragraph"] = filters["paragraph"]
+    if filters["exclude"]:
+        params["exclude"] = filters["exclude"]
+    if filters["uid"]:
+        params["uid"] = filters["uid"]
+    if filters["author"]:
+        params["author"] = filters["author"]
+
+    payload = _haozhuma_request(haozhuma_config["api_domain"], params)
+    phone = _extract_phone_number(payload)
+    if not phone:
+        raise RuntimeError(f"豪猪取号失败: {payload.get('raw') or payload}")
+    return {
+        "phone": phone,
+        "country_code": haozhuma_config["default_country_code"],
+        "local_number": phone,
+        "raw_response": payload,
+    }
+
+
+def haozhuma_blacklist_phone(haozhuma_config, token, phone_info):
+    phone = phone_info.get("phone") or phone_info.get("local_number") or ""
+    if not phone:
+        return
+    try:
+        payload = _haozhuma_request(
+            haozhuma_config["api_domain"],
+            {
+                "api": "addBlacklist",
+                "token": token,
+                "sid": haozhuma_config["project_id"],
+                "phone": phone,
+            },
+        )
+        print(f"{Fore.YELLOW}🚫 已尝试拉黑手机号 {phone}: {payload.get('raw') or payload}{Style.RESET_ALL}")
+    except Exception as e:
+        print(f"{Fore.YELLOW}⚠️ 拉黑手机号失败 {phone}: {e}{Style.RESET_ALL}")
+
+
+def haozhuma_get_sms_code(haozhuma_config, token, phone_info):
+    phone = phone_info.get("phone") or phone_info.get("local_number") or ""
+    timeout_seconds = haozhuma_config["retry"]["sms_poll_timeout_seconds"]
+    poll_interval = haozhuma_config["retry"]["poll_interval_seconds"]
+    deadline = time.time() + timeout_seconds
+
+    while time.time() < deadline:
+        payload = _haozhuma_request(
+            haozhuma_config["api_domain"],
+            {
+                "api": "getMessage",
+                "token": token,
+                "sid": haozhuma_config["project_id"],
+                "phone": phone,
+            },
+        )
+        code = _extract_sms_code(payload)
+        if code:
+            return code
+
+        print(f"{Fore.CYAN}⏳ 等待豪猪验证码中... 手机号 {phone}{Style.RESET_ALL}")
+        time.sleep(poll_interval)
+
+    raise TimeoutError(f"豪猪验证码获取超时: {phone}")
+
+
+def fill_phone_form_via_cdp(page, country_code, local_number):
+    country_value = f"+{str(country_code).lstrip('+')}"
+    local_value = re.sub(r"\D", "", str(local_number))
+
+    country_input = page.ele('@name=country_code')
+    local_input = page.ele('@name=local_number')
+    if not country_input or not local_input:
+        raise RuntimeError("未找到国家码/手机号输入框")
+
+    def _read_value_from_element(ele):
+        for attr_name in ("value", "@value"):
+            try:
+                value = ele.attr(attr_name)
+                if value is not None:
+                    return str(value)
+            except Exception:
+                pass
+        return None
+
+    def _run_cdp(method: str, params=None):
+        params = params or {}
+        for runner in (
+            getattr(page, "run_cdp", None),
+            getattr(page, "_run_cdp", None),
+            getattr(getattr(page, "driver", None), "run", None),
+        ):
+            if not runner:
+                continue
+            try:
+                return runner(method, **params)
+            except TypeError:
+                try:
+                    return runner(method, params)
+                except TypeError:
+                    continue
+        raise RuntimeError("当前 DrissionPage 页面对象不支持 CDP 调用")
+
+    def _focus_input_with_cdp(ele, label: str):
+        backend_id = getattr(ele, "_backend_id", None)
+        if backend_id is None:
+            raise RuntimeError(f"{label} 缺少 backendNodeId，无法用 CDP 聚焦")
+
+        try:
+            _run_cdp("DOM.scrollIntoViewIfNeeded", {"backendNodeId": backend_id})
+        except Exception:
+            pass
+
+        _run_cdp("DOM.focus", {"backendNodeId": backend_id})
+        time.sleep(0.08)
+
+    def _dispatch_key(event_type: str, key: str, code: str, vk: int, modifiers: int = 0):
+        return _run_cdp(
+            "Input.dispatchKeyEvent",
+            {
+                "type": event_type,
+                "key": key,
+                "code": code,
+                "windowsVirtualKeyCode": vk,
+                "nativeVirtualKeyCode": vk,
+                "modifiers": modifiers,
+            },
+        )
+
+    def _cdp_select_all():
+        if sys.platform == "darwin":
+            modifier_key, modifier_code, modifier_vk, modifiers = "Meta", "MetaLeft", 91, 4
+        else:
+            modifier_key, modifier_code, modifier_vk, modifiers = "Control", "ControlLeft", 17, 2
+
+        _dispatch_key("keyDown", modifier_key, modifier_code, modifier_vk, modifiers)
+        try:
+            _dispatch_key("keyDown", "a", "KeyA", 65, modifiers)
+            _dispatch_key("keyUp", "a", "KeyA", 65, modifiers)
+        finally:
+            _dispatch_key("keyUp", modifier_key, modifier_code, modifier_vk, 0)
+
+    def _cdp_backspace():
+        _dispatch_key("keyDown", "Backspace", "Backspace", 8)
+        _dispatch_key("keyUp", "Backspace", "Backspace", 8)
+
+    def _cdp_insert_text(text: str):
+        return _run_cdp("Input.insertText", {"text": str(text)})
+
+    def _clear_with_cdp(ele, label: str, max_backspace: int):
+        before = _read_value_from_element(ele)
+        _focus_input_with_cdp(ele, label)
+
+        for _ in range(3):
+            _cdp_select_all()
+            time.sleep(0.04)
+            _cdp_backspace()
+            time.sleep(0.08)
+            cur = _read_value_from_element(ele)
+            if cur == "":
+                break
+
+        # If the value reader is stale or unavailable, send a few extra deletes.
+        for _ in range(max_backspace):
+            cur = _read_value_from_element(ele)
+            if cur == "":
+                break
+            try:
+                _cdp_backspace()
+            except Exception:
+                break
+            time.sleep(0.03)
+        return before, _read_value_from_element(ele)
+
+    def _set_input(ele, value: str, label: str, max_backspace: int):
+        def _expected_match(actual_value) -> bool:
+            if actual_value is None:
+                return False
+            if "手机号" in label:
+                return re.sub(r"\D", "", actual_value) == value
+            return actual_value == value
+
+        # 1) Prefer DrissionPage's native input (simpler, often works for standard <input>).
+        #    Phone fields sometimes need special events; if it doesn't "stick" (or can't be read),
+        #    we fall back to CDP-based key simulation.
+        try:
+            before_clear = _read_value_from_element(ele)
+            try:
+                ele.click()
+            except Exception:
+                pass
+            try:
+                ele.clear()
+            except Exception:
+                pass
+            time.sleep(0.05)
+            ele.input(value)
+            time.sleep(0.15)
+            actual = _read_value_from_element(ele)
+            print(
+                f"{Fore.CYAN}✍️ {label} input 输入：before={before_clear!r}, after_input={actual!r}, wanted={value!r}{Style.RESET_ALL}"
+            )
+            if _expected_match(actual):
+                return actual
+        except Exception as e:
+            print(f"{Fore.YELLOW}⚠️ {label} input 输入失败：{e}{Style.RESET_ALL}")
+
+        # 2) CDP fallback (for masked/custom inputs that require key/DOM focus simulation).
+        before_clear, after_clear = _clear_with_cdp(ele, label, max_backspace)
+        _focus_input_with_cdp(ele, label)
+        _cdp_insert_text(value)
+        time.sleep(0.15)
+        actual = _read_value_from_element(ele)
+        print(
+            f"{Fore.CYAN}⌨️ {label} CDP 输入：before={before_clear!r}, after_clear={after_clear!r}, after_input={actual!r}, wanted={value!r}{Style.RESET_ALL}"
+        )
+        return actual
+
+    before_country = _read_value_from_element(country_input)
+    before_local = _read_value_from_element(local_input)
+
+    after_country = _set_input(country_input, country_value, "区号", max_backspace=12)
+    after_local = _set_input(local_input, local_value, "手机号", max_backspace=32)
+
+    # Some pages re-normalize country after local changes; enforce again and validate.
+    after_country = _set_input(country_input, country_value, "区号复核", max_backspace=12)
+    after_local_raw = _read_value_from_element(local_input)
+    after_local_digits = re.sub(r"\D", "", after_local_raw or "")
+    print(
+        f"{Fore.CYAN}🧾 豪猪填号校验：before=({before_country},{before_local}) after=({after_country},{after_local_raw}) wanted=({country_value},{local_value}){Style.RESET_ALL}"
+    )
+
+    # Don't hard-fail when value is not readable from the element (some UIs store it in JS state).
+    country_mismatch = after_country is not None and after_country != country_value
+    local_mismatch = after_local_raw is not None and after_local_digits != local_value
+    if country_mismatch or local_mismatch:
+        raise RuntimeError(
+            f"手机号输入校验失败: country={after_country!r}, local={after_local_raw!r}, "
+            f"wanted=({country_value!r},{local_value!r})"
+        )
+    time.sleep(0.6)
+
+
+def click_send_sms(page):
+    selectors = [
+        "xpath://button[@type='submit' and contains(normalize-space(.), '发送验证码')]",
+        "xpath://button[@type='submit' and contains(normalize-space(.), 'Send code')]",
+        "@type=submit",
+    ]
+    for selector in selectors:
+        try:
+            btn = page.ele(selector)
+            if btn:
+                btn.click()
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _page_has_phone_error(page):
+    error_markers = [
+        "此电话号码不可用",
+        "This phone number is unavailable",
+        "invalid phone",
+        "not available",
+    ]
+    try:
+        error_ele = page.ele(".ak-ErrorMessage")
+        if error_ele:
+            text = (error_ele.text or "").strip()
+            if text:
+                lowered = text.lower()
+                if any(marker.lower() in lowered for marker in error_markers):
+                    return True, text
+                if "phone" in lowered or "电话" in text or "手机号" in text:
+                    return True, text
+    except Exception:
+        pass
+    return False, ""
+
+
+def wait_phone_send_result(page, haozhuma_config):
+    timeout_seconds = haozhuma_config["retry"]["send_check_timeout_seconds"]
+    poll_interval = haozhuma_config["retry"]["poll_interval_seconds"]
+    time.sleep(2)
+    deadline = time.time() + timeout_seconds
+
+    while time.time() < deadline:
+        current_url = page.url or ""
+        if "radar-challenge/verify" in current_url:
+            return True, current_url
+
+        has_error, error_text = _page_has_phone_error(page)
+        if has_error:
+            return False, error_text or current_url
+
+        time.sleep(poll_interval)
+
+    current_url = page.url or ""
+    return ("radar-challenge/verify" in current_url), current_url
+
+
+def fill_verification_code_digits(browser_tab, verification_code, config):
+    for i, digit in enumerate(str(verification_code).strip()):
+        browser_tab.ele(f"@data-index={i}").input(digit)
+        time.sleep(get_random_wait_time(config, 'verification_code_input'))
+
+
+def run_haozhuma_phone_loop(page, custom_config, config):
+    haozhuma_config = get_haozhuma_runtime_config(custom_config)
+    if not haozhuma_config["enabled"]:
+        return None
+
+    required_fields = [
+        haozhuma_config["api_domain"],
+        haozhuma_config["username"],
+        haozhuma_config["password"],
+        haozhuma_config["project_id"],
+    ]
+    if not all(required_fields):
+        raise RuntimeError("豪猪自动手机号已启用，但配置不完整")
+
+    token = haozhuma_login(haozhuma_config)
+    print(f"{Fore.GREEN}✅ 豪猪登录成功，已获取 token{Style.RESET_ALL}")
+
+    max_retry = haozhuma_config["retry"]["max_phone_retry"]
+    fixed_phone_raw = str(haozhuma_config.get("fixed_phone") or "").strip()
+    fixed_phone_digits = re.sub(r"\D", "", fixed_phone_raw)
+
+    default_cc_digits = re.sub(
+        r"\D",
+        "",
+        str(haozhuma_config.get("default_country_code") or ""),
+    )
+
+    use_fixed_phone = bool(fixed_phone_digits)
+    fixed_phone_info = None
+    if use_fixed_phone:
+        if len(fixed_phone_digits) < 6:
+            raise RuntimeError(f"指定手机号无效（至少 6 位）：{fixed_phone_raw!r}")
+
+        # 如果用户填的是“带区号的完整手机号”，且能匹配到默认区号，则去掉前缀区号作为 local number。
+        # 否则就把输入整体当 local number（尽量不“猜错”）。
+        if default_cc_digits and fixed_phone_digits.startswith(default_cc_digits):
+            local_number = fixed_phone_digits[len(default_cc_digits) :]
+            country_code = default_cc_digits
+        else:
+            local_number = fixed_phone_digits
+            country_code = default_cc_digits or str(haozhuma_config.get("default_country_code") or "86")
+
+        if not local_number or len(local_number) < 6:
+            raise RuntimeError(
+                f"指定手机号解析后 local_number 不合法：country={country_code!r}, local={local_number!r}"
+            )
+
+        phone_info = {
+            "phone": local_number,  # 用于 getMessage 的 phone 入参：与原逻辑一致（local digits）
+            "country_code": country_code,
+            "local_number": local_number,
+            "raw_response": {"fixed_phone": fixed_phone_raw},
+        }
+        print(
+            f"{Fore.CYAN}🔧 使用固定手机号配置: +{phone_info['country_code']} {phone_info['local_number']}{Style.RESET_ALL}"
+        )
+        fixed_phone_info = phone_info
+    fixed_used = False
+
+    # default behavior: 调用豪猪取号 API（固定手机号只尝试一次，失败后拉黑并切回 API）
+    for attempt in range(1, max_retry + 1):
+        if use_fixed_phone and not fixed_used:
+            fixed_used = True
+            print(
+                f"{Fore.CYAN}📱 使用固定手机号发送验证码尝试 {attempt}/{max_retry}{Style.RESET_ALL}"
+            )
+            fill_phone_form_via_cdp(
+                page,
+                fixed_phone_info["country_code"],
+                fixed_phone_info["local_number"],
+            )
+            if not click_send_sms(page):
+                raise RuntimeError("未找到发送验证码按钮")
+
+            send_success, detail = wait_phone_send_result(page, haozhuma_config)
+            if send_success:
+                print(
+                    f"{Fore.GREEN}✅ 固定手机号可用，已进入验证码页面: {detail}{Style.RESET_ALL}"
+                )
+                fixed_phone_info["token"] = token
+                return fixed_phone_info
+
+            print(
+                f"{Fore.YELLOW}⚠️ 固定手机号不可用，准备拉黑并切换到 API: {detail}{Style.RESET_ALL}"
+            )
+            haozhuma_blacklist_phone(haozhuma_config, token, fixed_phone_info)
+            continue
+
+        print(
+            f"{Fore.CYAN}📱 豪猪自动手机号第 {attempt}/{max_retry} 次尝试{Style.RESET_ALL}"
+        )
+        phone_info = haozhuma_get_phone(haozhuma_config, token)
+        print(
+            f"{Fore.CYAN}📞 获取到手机号: +{phone_info['country_code']} {phone_info['local_number']}{Style.RESET_ALL}"
+        )
+
+        fill_phone_form_via_cdp(page, phone_info["country_code"], phone_info["local_number"])
+        if not click_send_sms(page):
+            raise RuntimeError("未找到发送验证码按钮")
+
+        send_success, detail = wait_phone_send_result(page, haozhuma_config)
+        if send_success:
+            print(
+                f"{Fore.GREEN}✅ 手机号可用，已进入验证码页面: {detail}{Style.RESET_ALL}"
+            )
+            phone_info["token"] = token
+            return phone_info
+
+        print(
+            f"{Fore.YELLOW}⚠️ 当前手机号不可用，准备拉黑并重试: {detail}{Style.RESET_ALL}"
+        )
+        haozhuma_blacklist_phone(haozhuma_config, token, phone_info)
+
+    raise RuntimeError("豪猪手机号多次重试后仍未进入验证码页面")
 
 def cleanup_chrome_processes(translator=None):
     """Clean only Chrome processes launched by this script"""
@@ -691,7 +1294,7 @@ def fill_password(page, password: str, config, translator=None):
 
         return False
 
-def wait_for_phone_verification(browser_tab, translator=None, controller=None):
+def wait_for_phone_verification(browser_tab, translator=None, controller=None, custom_config=None, config=None):
     """Check if phone verification page appears and wait for user to complete it"""
     try:
         print(f"{Fore.CYAN}📱 等待并检查是否出现手机号验证页面...{Style.RESET_ALL}")
@@ -708,6 +1311,13 @@ def wait_for_phone_verification(browser_tab, translator=None, controller=None):
             print(f"\n{Fore.YELLOW}{'='*60}{Style.RESET_ALL}")
             print(f"{Fore.YELLOW}⚠️  检测到手机号验证页面！{Style.RESET_ALL}")
             print(f"{Fore.YELLOW}📱 当前URL: {current_url}{Style.RESET_ALL}")
+            haozhuma_runtime_config = get_haozhuma_runtime_config(custom_config)
+            if haozhuma_runtime_config["enabled"]:
+                print(f"{Fore.YELLOW}🤖 已启用豪猪自动手机号，开始自动处理...{Style.RESET_ALL}")
+                phone_info = run_haozhuma_phone_loop(browser_tab, custom_config, config)
+                setattr(browser_tab, "_haozhuma_phone_info", phone_info)
+                return "phone_verify_ready"
+
             print(f"{Fore.YELLOW}⏳ 请在浏览器中完成手机号验证...{Style.RESET_ALL}")
             print(f"{Fore.YELLOW}{'='*60}{Style.RESET_ALL}\n")
             
@@ -747,11 +1357,26 @@ def wait_for_phone_verification(browser_tab, translator=None, controller=None):
             
     except Exception as e:
         print(f"{Fore.RED}❌ 检查手机号验证页面时出错: {str(e)}{Style.RESET_ALL}")
-        return True  # If error occurs, continue with normal flow
+        return False  # 手机号验证失败不能继续进入 settings/token 流程
 
-def handle_verification_code(browser_tab, email_tab, controller, config, translator=None):
+def handle_verification_code(browser_tab, email_tab, controller, config, translator=None, custom_config=None):
     """Handle verification code"""
     try:
+        haozhuma_runtime_config = get_haozhuma_runtime_config(custom_config)
+        phone_info = getattr(browser_tab, "_haozhuma_phone_info", None)
+        current_url = browser_tab.url or ""
+        if haozhuma_runtime_config["enabled"] and phone_info and "radar-challenge/verify" in current_url:
+            print(f"{Fore.CYAN}📨 正在从豪猪接口轮询短信验证码...{Style.RESET_ALL}")
+            verification_code = haozhuma_get_sms_code(
+                haozhuma_runtime_config,
+                phone_info["token"],
+                phone_info,
+            )
+            fill_verification_code_digits(browser_tab, verification_code, config)
+            print(f"{Fore.GREEN}✅ 已自动填写豪猪短信验证码{Style.RESET_ALL}")
+            setattr(browser_tab, "_haozhuma_phone_info", None)
+            return True
+
         if translator:
             print(f"\n{Fore.CYAN}🔄 {translator.get('register.waiting_for_verification_code')}{Style.RESET_ALL}")
             
@@ -760,9 +1385,7 @@ def handle_verification_code(browser_tab, email_tab, controller, config, transla
             verification_code = controller.get_verification_code()
             if verification_code:
                 # Fill verification code in registration page
-                for i, digit in enumerate(verification_code):
-                    browser_tab.ele(f"@data-index={i}").input(digit)
-                    time.sleep(get_random_wait_time(config, 'verification_code_input'))
+                fill_verification_code_digits(browser_tab, verification_code, config)
                 
                 print(f"{translator.get('register.verification_success')}")
                 time.sleep(get_random_wait_time(config, 'verification_success_wait'))
@@ -774,10 +1397,21 @@ def handle_verification_code(browser_tab, email_tab, controller, config, transla
                     time.sleep(get_random_wait_time(config, 'verification_retry_wait'))
                     
                     # Check for phone verification page before visiting settings
-                    phone_verification_result = wait_for_phone_verification(browser_tab, translator, controller)
+                    phone_verification_result = wait_for_phone_verification(browser_tab, translator, controller, custom_config, config)
                     if phone_verification_result == False:
                         print(f"{Fore.RED}❌ 手机号验证检查失败{Style.RESET_ALL}")
                         return False, None
+                    if phone_verification_result == "phone_verify_ready":
+                        if not handle_verification_code(browser_tab, None, controller, config, translator, custom_config):
+                            print(f"{Fore.RED}❌ 豪猪短信验证码处理失败{Style.RESET_ALL}")
+                            return False, None
+                        if controller and hasattr(controller, 'enable_bank_card_binding') and not controller.enable_bank_card_binding:
+                            print(f"{Fore.GREEN}✅ 注册流程已完成，跳过访问settings页面{Style.RESET_ALL}")
+                            return True, browser_tab
+                        print(f"{Fore.CYAN}🔑 {translator.get('register.visiting_url')}: https://www.cursor.com/settings{Style.RESET_ALL}")
+                        browser_tab.get("https://www.cursor.com/settings")
+                        time.sleep(get_random_wait_time(config, 'settings_page_load_wait'))
+                        return True, browser_tab
                     
                     # 如果未勾选自动绑定银行卡，直接返回完成
                     if phone_verification_result == "skip_settings":
@@ -806,9 +1440,7 @@ def handle_verification_code(browser_tab, email_tab, controller, config, transla
                 verification_code = email_tab.get_verification_code()
                 if verification_code:
                     # Fill verification code in registration page
-                    for i, digit in enumerate(verification_code):
-                        browser_tab.ele(f"@data-index={i}").input(digit)
-                        time.sleep(get_random_wait_time(config, 'verification_code_input'))
+                    fill_verification_code_digits(browser_tab, verification_code, config)
                     
                     if translator:
                         print(f"{Fore.GREEN}✅ {translator.get('register.verification_success')}{Style.RESET_ALL}")
@@ -821,10 +1453,22 @@ def handle_verification_code(browser_tab, email_tab, controller, config, transla
                         time.sleep(get_random_wait_time(config, 'verification_retry_wait'))
                         
                         # Check for phone verification page before visiting settings
-                        phone_verification_result = wait_for_phone_verification(browser_tab, translator, controller)
+                        phone_verification_result = wait_for_phone_verification(browser_tab, translator, controller, custom_config, config)
                         if phone_verification_result == False:
                             print(f"{Fore.RED}❌ 手机号验证检查失败{Style.RESET_ALL}")
                             return False, None
+                        if phone_verification_result == "phone_verify_ready":
+                            if not handle_verification_code(browser_tab, None, controller, config, translator, custom_config):
+                                print(f"{Fore.RED}❌ 豪猪短信验证码处理失败{Style.RESET_ALL}")
+                                return False, None
+                            if controller and hasattr(controller, 'enable_bank_card_binding') and not controller.enable_bank_card_binding:
+                                print(f"{Fore.GREEN}✅ 注册流程已完成，跳过访问settings页面{Style.RESET_ALL}")
+                                return True, browser_tab
+                            if translator:
+                                print(f"{Fore.CYAN}🔑 {translator.get('register.visiting_url')}: https://www.cursor.com/settings{Style.RESET_ALL}")
+                            browser_tab.get("https://www.cursor.com/settings")
+                            time.sleep(get_random_wait_time(config, 'settings_page_load_wait'))
+                            return True, browser_tab
                         
                         # 如果未勾选自动绑定银行卡，直接返回完成
                         if phone_verification_result == "skip_settings":
@@ -878,9 +1522,7 @@ def handle_verification_code(browser_tab, email_tab, controller, config, transla
             
             if verification_code:
                 # Fill verification code in registration page
-                for i, digit in enumerate(verification_code):
-                    browser_tab.ele(f"@data-index={i}").input(digit)
-                    time.sleep(get_random_wait_time(config, 'verification_code_input'))
+                fill_verification_code_digits(browser_tab, verification_code, config)
                 
                 if translator:
                     print(f"{Fore.GREEN}✅ {translator.get('register.verification_success')}{Style.RESET_ALL}")
@@ -893,10 +1535,22 @@ def handle_verification_code(browser_tab, email_tab, controller, config, transla
                     time.sleep(get_random_wait_time(config, 'verification_retry_wait'))
                     
                     # Check for phone verification page before visiting settings
-                    phone_verification_result = wait_for_phone_verification(browser_tab, translator, controller)
+                    phone_verification_result = wait_for_phone_verification(browser_tab, translator, controller, custom_config, config)
                     if phone_verification_result == False:
                         print(f"{Fore.RED}❌ 手机号验证检查失败{Style.RESET_ALL}")
                         return False, None
+                    if phone_verification_result == "phone_verify_ready":
+                        if not handle_verification_code(browser_tab, None, controller, config, translator, custom_config):
+                            print(f"{Fore.RED}❌ 豪猪短信验证码处理失败{Style.RESET_ALL}")
+                            return False, None
+                        if controller and hasattr(controller, 'enable_bank_card_binding') and not controller.enable_bank_card_binding:
+                            print(f"{Fore.GREEN}✅ 注册流程已完成，跳过访问settings页面{Style.RESET_ALL}")
+                            return True, browser_tab
+                        if translator:
+                            print(f"{Fore.CYAN}{translator.get('register.visiting_url')}: https://www.cursor.com/settings{Style.RESET_ALL}")
+                        browser_tab.get("https://www.cursor.com/settings")
+                        time.sleep(get_random_wait_time(config, 'settings_page_load_wait'))
+                        return True, browser_tab
                     
                     # 如果未勾选自动绑定银行卡，直接返回完成
                     if phone_verification_result == "skip_settings":
@@ -1040,12 +1694,11 @@ def main(email=None, password=None, first_name=None, last_name=None, email_tab=N
                     print(f"{Fore.CYAN}💡 请手动完成Cloudflare验证后，页面会自动跳转到正确的注册页面{Style.RESET_ALL}")
                     
                     # 等待用户手动完成CF验证
-                    print(f"{Fore.CYAN}⏳ 等待页面自动跳转...（最多等待60秒）{Style.RESET_ALL}")
+                    print(f"{Fore.CYAN}⏳ 等待页面自动跳转...（将持续等待直到跳转成功）{Style.RESET_ALL}")
                     
                     # 轮询检查URL是否已经包含参数
                     wait_time = 0
-                    max_wait = 60
-                    while wait_time < max_wait:
+                    while True:
                         time.sleep(2)
                         wait_time += 2
                         current_url = page.url
@@ -1056,11 +1709,7 @@ def main(email=None, password=None, first_name=None, last_name=None, email_tab=N
                             break
                         
                         if wait_time % 10 == 0:
-                            print(f"{Fore.CYAN}⏳ 继续等待... ({wait_time}/{max_wait}秒){Style.RESET_ALL}")
-                    
-                    if wait_time >= max_wait:
-                        print(f"{Fore.RED}❌ 等待超时，页面未跳转到正确的注册URL{Style.RESET_ALL}")
-                        return False, None
+                            print(f"{Fore.CYAN}⏳ 继续等待... (已等待{wait_time}秒){Style.RESET_ALL}")
                     
                     # 已经跳转到正确URL，跳出循环
                     break
@@ -1374,7 +2023,7 @@ def main(email=None, password=None, first_name=None, last_name=None, email_tab=N
                     
                     # Step 6: 获取验证码并输入
                     print(f"{Fore.CYAN}📱 开始处理验证码...{Style.RESET_ALL}")
-                    if handle_verification_code(page, email_tab, controller, config, translator):
+                    if handle_verification_code(page, email_tab, controller, config, translator, custom_config):
                         success = True
                         return True, page
                     else:
@@ -1407,7 +2056,7 @@ def main(email=None, password=None, first_name=None, last_name=None, email_tab=N
                     if handle_turnstile(page, config, translator):
                         if translator:
                             print(f"\n{Fore.CYAN}🔄 {translator.get('register.waiting_for_verification_code')}{Style.RESET_ALL}")
-                        if handle_verification_code(page, email_tab, controller, config, translator):
+                        if handle_verification_code(page, email_tab, controller, config, translator, custom_config):
                             success = True
                             return True, page
                         else:

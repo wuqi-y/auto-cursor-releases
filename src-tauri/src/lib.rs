@@ -72,6 +72,77 @@ pub fn get_app_dir() -> Result<PathBuf, String> {
     Ok(app_dir)
 }
 
+fn get_shared_config_dir() -> Result<PathBuf, String> {
+    let home = dirs::home_dir().ok_or_else(|| "Could not find user home directory".to_string())?;
+    let dir = home.join(".auto-cursor-vip");
+    fs::create_dir_all(&dir).map_err(|e| format!("Failed to create shared config dir: {}", e))?;
+    Ok(dir)
+}
+
+fn get_primary_config_path(file_name: &str) -> Result<PathBuf, String> {
+    Ok(get_shared_config_dir()?.join(file_name))
+}
+
+fn get_legacy_config_path(file_name: &str) -> Result<PathBuf, String> {
+    Ok(get_app_dir()?.join(file_name))
+}
+
+fn read_config_with_legacy_fallback(file_name: &str) -> Result<String, String> {
+    let primary_path = get_primary_config_path(file_name)?;
+    if primary_path.exists() {
+        return fs::read_to_string(&primary_path)
+            .map_err(|e| format!("Failed to read config {:?}: {}", primary_path, e));
+    }
+
+    let legacy_path = get_legacy_config_path(file_name)?;
+    if legacy_path.exists() {
+        return fs::read_to_string(&legacy_path)
+            .map_err(|e| format!("Failed to read legacy config {:?}: {}", legacy_path, e));
+    }
+
+    Ok(String::new())
+}
+
+fn merge_haozhuma_config_into_runtime_config(
+    config_obj: &mut serde_json::Value,
+    frontend_config: Option<&serde_json::Value>,
+) {
+    let saved_config = read_haozhuma_config_sync()
+        .ok()
+        .filter(|content| !content.trim().is_empty())
+        .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok());
+
+    let frontend_haozhuma_config = frontend_config.and_then(|value| value.get("haozhuma"));
+
+    let merged_haozhuma = match (saved_config, frontend_haozhuma_config) {
+        (Some(mut saved), Some(frontend)) => {
+            merge_json_value(&mut saved, frontend);
+            saved
+        }
+        (Some(saved), None) => saved,
+        (None, Some(frontend)) => frontend.clone(),
+        (None, None) => return,
+    };
+
+    config_obj["haozhuma"] = merged_haozhuma;
+}
+
+fn merge_json_value(target: &mut serde_json::Value, patch: &serde_json::Value) {
+    match (target, patch) {
+        (serde_json::Value::Object(target_map), serde_json::Value::Object(patch_map)) => {
+            for (key, patch_value) in patch_map {
+                let target_value = target_map
+                    .entry(key.clone())
+                    .or_insert(serde_json::Value::Null);
+                merge_json_value(target_value, patch_value);
+            }
+        }
+        (target_slot, patch_value) => {
+            *target_slot = patch_value.clone();
+        }
+    }
+}
+
 // 创建隐藏窗口的Command（Windows平台适配）
 fn create_hidden_command(executable_path: &str) -> Command {
     #[cfg(target_os = "windows")]
@@ -448,6 +519,37 @@ struct EmailConfig {
     email_domain: String,
     admin_password: String,
     access_password: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct HaozhumaPhoneFilters {
+    isp: String,
+    province: String,
+    ascription: String,
+    paragraph: String,
+    exclude: String,
+    uid: String,
+    author: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct HaozhumaRetryConfig {
+    max_phone_retry: u64,
+    poll_interval_seconds: u64,
+    send_check_timeout_seconds: u64,
+    sms_poll_timeout_seconds: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct HaozhumaConfig {
+    enabled: bool,
+    api_domain: String,
+    username: String,
+    password: String,
+    project_id: String,
+    default_country_code: String,
+    phone_filters: HaozhumaPhoneFilters,
+    retry: HaozhumaRetryConfig,
 }
 
 // Cloudflare临时邮箱相关结构体
@@ -4260,6 +4362,8 @@ async fn register_with_email(
             log_info!("🌐 添加自定义浏览器路径到配置: {}", browser_path);
         }
 
+        merge_haozhuma_config_into_runtime_config(&mut config_obj, Some(&frontend_config));
+
         config_obj
     } else {
         // 使用默认配置
@@ -4277,6 +4381,8 @@ async fn register_with_email(
             config_obj["custom_browser_path"] = serde_json::Value::String(browser_path.clone());
             log_info!("🌐 添加自定义浏览器路径到配置: {}", browser_path);
         }
+
+        merge_haozhuma_config_into_runtime_config(&mut config_obj, None);
 
         config_obj
     };
@@ -4696,6 +4802,8 @@ async fn register_with_cloudflare_temp_email(
             log_info!("🌐 添加自定义浏览器路径到配置: {}", browser_path);
         }
 
+        merge_haozhuma_config_into_runtime_config(&mut config_obj, Some(&frontend_config));
+
         config_obj
     } else {
         // 使用默认配置
@@ -4713,6 +4821,8 @@ async fn register_with_cloudflare_temp_email(
             config_obj["custom_browser_path"] = serde_json::Value::String(browser_path.clone());
             log_info!("🌐 添加自定义浏览器路径到配置: {}", browser_path);
         }
+
+        merge_haozhuma_config_into_runtime_config(&mut config_obj, None);
 
         config_obj
     };
@@ -5095,6 +5205,8 @@ async fn register_with_tempmail(
             log_info!("🌐 添加自定义浏览器路径到配置: {}", browser_path);
         }
 
+        merge_haozhuma_config_into_runtime_config(&mut config_obj, Some(&frontend_config));
+
         config_obj
     } else {
         let mut config_obj = serde_json::json!({
@@ -5112,6 +5224,8 @@ async fn register_with_tempmail(
             config_obj["custom_browser_path"] = serde_json::Value::String(browser_path.clone());
             log_info!("🌐 添加自定义浏览器路径到配置: {}", browser_path);
         }
+
+        merge_haozhuma_config_into_runtime_config(&mut config_obj, None);
 
         config_obj
     };
@@ -6617,6 +6731,7 @@ async fn register_with_self_hosted_mail_api(
         if let Some(browser_path) = &custom_browser_path {
             config_obj["custom_browser_path"] = serde_json::Value::String(browser_path.clone());
         }
+        merge_haozhuma_config_into_runtime_config(&mut config_obj, Some(&frontend_config));
         config_obj
     } else {
         let mut config_obj = serde_json::json!({
@@ -6630,6 +6745,7 @@ async fn register_with_self_hosted_mail_api(
         if let Some(browser_path) = &custom_browser_path {
             config_obj["custom_browser_path"] = serde_json::Value::String(browser_path.clone());
         }
+        merge_haozhuma_config_into_runtime_config(&mut config_obj, None);
         config_obj
     };
 
@@ -7136,28 +7252,14 @@ async fn check_and_convert_bank_card_config() -> Result<String, String> {
 
 #[tauri::command]
 async fn read_bank_card_config() -> Result<String, String> {
-    use std::fs;
-
-    // 获取应用目录
-    let app_dir = get_app_dir()?;
-    let config_path = app_dir.join("bank_card_config.json");
-
-    if config_path.exists() {
-        fs::read_to_string(&config_path)
-            .map_err(|e| format!("Failed to read bank card config: {}", e))
-    } else {
-        // 如果文件不存在，返回空字符串，前端会使用默认配置
-        Ok(String::new())
-    }
+    read_config_with_legacy_fallback("bank_card_config.json")
 }
 
 #[tauri::command]
 async fn save_bank_card_config(config: String) -> Result<(), String> {
     use std::fs;
 
-    // 获取应用目录
-    let app_dir = get_app_dir()?;
-    let config_path = app_dir.join("bank_card_config.json");
+    let config_path = get_primary_config_path("bank_card_config.json")?;
 
     // 验证JSON格式
     serde_json::from_str::<serde_json::Value>(&config)
@@ -7174,9 +7276,8 @@ async fn save_bank_card_config(config: String) -> Result<(), String> {
 async fn backup_bank_card_config() -> Result<String, String> {
     use std::fs;
 
-    let app_dir = get_app_dir()?;
-    let config_path = app_dir.join("bank_card_config.json");
-    let backup_path = app_dir.join("bank_card_config.backup.json");
+    let config_path = get_primary_config_path("bank_card_config.json")?;
+    let backup_path = get_primary_config_path("bank_card_config.backup.json")?;
 
     if config_path.exists() {
         let config_content =
@@ -7196,9 +7297,8 @@ async fn backup_bank_card_config() -> Result<String, String> {
 async fn restore_bank_card_config() -> Result<(), String> {
     use std::fs;
 
-    let app_dir = get_app_dir()?;
-    let config_path = app_dir.join("bank_card_config.json");
-    let backup_path = app_dir.join("bank_card_config.backup.json");
+    let config_path = get_primary_config_path("bank_card_config.json")?;
+    let backup_path = get_primary_config_path("bank_card_config.backup.json")?;
 
     if backup_path.exists() {
         let backup_content =
@@ -7221,27 +7321,14 @@ async fn restore_bank_card_config() -> Result<(), String> {
 // Email Configuration Commands
 #[tauri::command]
 async fn read_email_config() -> Result<String, String> {
-    use std::fs;
-
-    // 获取应用目录
-    let app_dir = get_app_dir()?;
-    let config_path = app_dir.join("email_config.json");
-
-    if config_path.exists() {
-        fs::read_to_string(&config_path).map_err(|e| format!("Failed to read email config: {}", e))
-    } else {
-        // 如果文件不存在，返回空字符串，前端会使用默认配置
-        Ok(String::new())
-    }
+    read_config_with_legacy_fallback("email_config.json")
 }
 
 #[tauri::command]
 async fn save_email_config(config: String) -> Result<(), String> {
     use std::fs;
 
-    // 获取应用目录
-    let app_dir = get_app_dir()?;
-    let config_path = app_dir.join("email_config.json");
+    let config_path = get_primary_config_path("email_config.json")?;
 
     // 验证JSON格式
     serde_json::from_str::<serde_json::Value>(&config)
@@ -7251,6 +7338,238 @@ async fn save_email_config(config: String) -> Result<(), String> {
 
     log_info!("✅ 邮箱配置已保存到: {:?}", config_path);
     Ok(())
+}
+
+fn read_haozhuma_config_sync() -> Result<String, String> {
+    read_config_with_legacy_fallback("haozhuma_config.json")
+}
+
+#[tauri::command]
+async fn read_haozhuma_config() -> Result<String, String> {
+    read_haozhuma_config_sync()
+}
+
+#[tauri::command]
+async fn save_haozhuma_config(config: String) -> Result<(), String> {
+    let config_path = get_primary_config_path("haozhuma_config.json")?;
+
+    serde_json::from_str::<serde_json::Value>(&config)
+        .map_err(|e| format!("Invalid JSON format: {}", e))?;
+
+    fs::write(&config_path, config).map_err(|e| format!("Failed to save haozhuma config: {}", e))?;
+    log_info!("✅ 豪猪配置已保存到: {:?}", config_path);
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct HaozhumaTestResult {
+    success: bool,
+    message: String,
+    token_len: Option<usize>,
+    phone_last4: Option<String>,
+}
+
+fn extract_digits(input: &str) -> String {
+    input.chars().filter(|c| c.is_ascii_digit()).collect()
+}
+
+fn extract_token_from_text(text: &str) -> Option<String> {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(text) {
+        for key in ["token", "Token", "data", "result"] {
+            if let Some(val) = v.get(key) {
+                if let Some(s) = val.as_str() {
+                    let s = s.trim();
+                    if s.len() >= 8 {
+                        return Some(s.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    for sep in ["|", ",", ";"] {
+        if text.contains(sep) {
+            let parts: Vec<&str> = text.split(sep).collect();
+            for part in parts.iter().map(|p| p.trim()).filter(|p| !p.is_empty()) {
+                if part.len() >= 8 {
+                    return Some(part.to_string());
+                }
+            }
+        }
+    }
+
+    // Fallback: long enough contiguous alnum chunk
+    let token_re = Regex::new(r"([A-Za-z0-9]{8,})").ok()?;
+    token_re
+        .captures(text)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str().to_string())
+}
+
+async fn haozhuma_test_login(
+    api_domain: &str,
+    username: &str,
+    password: &str,
+) -> Result<String, String> {
+    let base = api_domain.trim();
+    let base = if base.starts_with("http://") || base.starts_with("https://") {
+        base.to_string()
+    } else {
+        format!("https://{}", base)
+    };
+    let url = format!("{}/sms/", base.trim_end_matches('/'));
+
+    let client = reqwest::Client::new();
+    let resp_text = client
+        .get(url)
+        .query(&[
+            ("api", "login"),
+            ("user", username),
+            ("pass", password),
+        ])
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| format!("豪猪登录请求失败: {}", e))?
+        .text()
+        .await
+        .map_err(|e| format!("豪猪登录响应读取失败: {}", e))?;
+
+    extract_token_from_text(&resp_text).ok_or_else(|| {
+        format!(
+            "豪猪登录未解析到 token，响应: {}",
+            resp_text.chars().take(300).collect::<String>()
+        )
+    })
+}
+
+async fn haozhuma_test_get_phone(
+    api_domain: &str,
+    token: &str,
+    sid: &str,
+    phone_filters: &serde_json::Value,
+) -> Result<String, String> {
+    let base = api_domain.trim();
+    let base = if base.starts_with("http://") || base.starts_with("https://") {
+        base.to_string()
+    } else {
+        format!("https://{}", base)
+    };
+    let url = format!("{}/sms/", base.trim_end_matches('/'));
+
+    let mut params: Vec<(&str, String)> = vec![
+        ("api", "getPhone".to_string()),
+        ("token", token.to_string()),
+        ("sid", sid.to_string()),
+    ];
+
+    let get_str = |k: &str| -> Option<String> {
+        phone_filters
+            .get(k)
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+
+    if let Some(v) = get_str("isp") {
+        params.push(("isp", v));
+    }
+    if let Some(v) = get_str("province") {
+        params.push(("Province", v));
+    }
+    if let Some(v) = get_str("ascription") {
+        params.push(("ascription", v));
+    }
+    if let Some(v) = get_str("paragraph") {
+        params.push(("paragraph", v));
+    }
+    if let Some(v) = get_str("exclude") {
+        params.push(("exclude", v));
+    }
+    if let Some(v) = get_str("uid") {
+        params.push(("uid", v));
+    }
+    if let Some(v) = get_str("author") {
+        params.push(("author", v));
+    }
+
+    let client = reqwest::Client::new();
+    let resp_text = client
+        .get(url)
+        .query(&params)
+        .timeout(std::time::Duration::from_secs(20))
+        .send()
+        .await
+        .map_err(|e| format!("豪猪取号请求失败: {}", e))?
+        .text()
+        .await
+        .map_err(|e| format!("豪猪取号响应读取失败: {}", e))?;
+
+    let digits = extract_digits(&resp_text);
+    if digits.len() < 6 {
+        return Err(format!(
+            "豪猪取号未解析到号码，响应: {}",
+            resp_text.chars().take(300).collect::<String>()
+        ));
+    }
+
+    Ok(digits)
+}
+
+#[tauri::command]
+async fn test_haozhuma_api(config: serde_json::Value) -> Result<String, String> {
+    let api_domain = config.get("api_domain").and_then(|v| v.as_str()).unwrap_or("").trim();
+    let username = config.get("username").and_then(|v| v.as_str()).unwrap_or("").trim();
+    let password = config.get("password").and_then(|v| v.as_str()).unwrap_or("").trim();
+    let project_id = config.get("project_id").and_then(|v| v.as_str()).unwrap_or("").trim();
+    let fixed_phone = config.get("fixed_phone").and_then(|v| v.as_str()).unwrap_or("").trim();
+    let phone_filters = config
+        .get("phone_filters")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+
+    if api_domain.is_empty() || username.is_empty() || password.is_empty() || project_id.is_empty() {
+        return Err("豪猪配置不完整：需要 api_domain / username / password / project_id".to_string());
+    }
+
+    let token = haozhuma_test_login(api_domain, username, password).await?;
+    let phone = if !fixed_phone.is_empty() {
+        let digits = extract_digits(fixed_phone);
+        if digits.len() < 6 {
+            return Err(format!(
+                "指定手机号无效（至少 6 位）：{}",
+                fixed_phone
+            ));
+        }
+        digits
+    } else {
+        haozhuma_test_get_phone(
+            api_domain,
+            &token,
+            project_id,
+            &phone_filters,
+        )
+        .await?
+    };
+
+    let last4 = if phone.len() >= 4 {
+        Some(phone.chars().rev().take(4).collect::<String>().chars().rev().collect())
+    } else {
+        None
+    };
+
+    let result = HaozhumaTestResult {
+        success: true,
+        message: if fixed_phone.is_empty() {
+            "豪猪 API 连接测试成功".to_string()
+        } else {
+            "豪猪 API 连接测试成功（使用指定手机号）".to_string()
+        },
+        token_len: Some(token.len()),
+        phone_last4: last4,
+    };
+
+    serde_json::to_string(&result).map_err(|e| format!("序列化测试结果失败: {}", e))
 }
 
 // 获取应用版本
@@ -8568,6 +8887,9 @@ pub fn run() {
             save_bank_card_config,
             read_email_config,
             save_email_config,
+            read_haozhuma_config,
+            save_haozhuma_config,
+            test_haozhuma_api,
             get_app_version,
             open_update_url,
             copy_pybuild_resources,
