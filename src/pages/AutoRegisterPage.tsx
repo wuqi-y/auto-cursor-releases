@@ -285,7 +285,6 @@ export const AutoRegisterPage: React.FC = () => {
   const batchCountRef = useRef(1);
   const isBatchRegisteringRef = useRef(false);
   const batchProgressEntriesRef = useRef<Map<number, string>>(new Map());
-  const cancelledStopTaskIdsRef = useRef<Set<string>>(new Set());
   const registrationRunIdRef = useRef(0);
   const currentTaskIdRef = useRef<string | null>(null);
   const currentTaskEmailRef = useRef<string | null>(null);
@@ -523,9 +522,8 @@ export const AutoRegisterPage: React.FC = () => {
           }
 
           if (data.line.includes("程序将保持运行状态")) {
-            // 提示用户手动输入绑卡地址，确认后将自动关闭浏览器进程进行下一个任务
-            // 如果是批量注册（2个及以上），3秒后自动发送停止信号，不显示阻塞弹窗
-            // 使用 ref 获取最新的 batchCount，避免读取到闭包中的旧值
+            // 提示用户手动完成绑卡/验证等；单个注册确认后写入停止文件以结束 Python 并进入下一任务
+            // 批量/串行：不在此自动写入停止文件（见下方「停止信号文件」说明）
             const isBatchRegistration = isBatchRegisteringRef.current;
 
             const sendCancelSignal = async (silent = false) => {
@@ -551,8 +549,16 @@ export const AutoRegisterPage: React.FC = () => {
 
             try {
               if (isBatchRegistration) {
-                // 批量注册模式：不直接取消全部；等待 Python 输出“停止信号文件...”后再只关闭当前窗口
-                console.log("⏳ 批量注册：检测到保持运行状态，等待停止信号文件行再关闭当前窗口");
+                // 批量模式：不要根据日志里的「停止信号文件:」路径自动 cancel（该行为是 Python 说明监控路径，一打印就会误触发）。
+                // 当前任务完成后可直接关闭浏览器窗口，Python 会检测到并退出，串行批量会继续下一项；需中止整批请点「取消注册」。
+                console.log(
+                  "⏳ 批量注册：进入保持运行/等待用户阶段，不会自动发送停止信号"
+                );
+                setToast({
+                  message:
+                    "批量注册：请在浏览器内完成验证/绑卡等操作。完成后可关闭浏览器窗口以结束本账号并进入下一项；中止整批请使用「取消注册」。",
+                  type: "info",
+                });
               } else {
                 // 单个注册模式：正常等待用户确认
                 const confirmed = await confirm(
@@ -573,33 +579,6 @@ export const AutoRegisterPage: React.FC = () => {
               console.error("弹窗确认失败:", error);
               setToast({ message: "弹窗确认失败，请重试", type: "error" });
               return;
-            }
-          }
-
-          // 批量注册：只关闭当前等待的注册窗口
-          if (
-            isBatchRegisteringRef.current &&
-            typeof data.line === "string" &&
-            data.line.includes("停止信号文件:")
-          ) {
-            // 兼容不同命名拼写（例如 registrration 的轻微差异）
-            // 直接从文件名中抓取：...stop_<taskId>.txt
-            const match = data.line.match(/stop_([^\\\/\s]+)\.txt/);
-            const taskId = match?.[1]?.trim();
-            console.log("🔍 收到停止信号 - task_id:", taskId);
-            
-            if (taskId && !cancelledStopTaskIdsRef.current.has(taskId)) {
-              cancelledStopTaskIdsRef.current.add(taskId);
-              try {
-                // 给 Python 先把旧 stop_file 清理完，避免刚写入就被当作旧文件删掉
-                await new Promise((r) => setTimeout(r, 800));
-                console.log("🔍 写入停止信号: task_id:", taskId);
-                await invoke("cancel_registration_task", {
-                  taskId: taskId,
-                });
-              } catch (e) {
-                console.error("cancel_registration_task 失败:", e);
-              }
             }
           }
 
@@ -957,7 +936,6 @@ export const AutoRegisterPage: React.FC = () => {
     setIsRegistering(false);
     isBatchRegisteringRef.current = false;
     batchProgressEntriesRef.current.clear();
-    cancelledStopTaskIdsRef.current.clear();
     setShowVerificationModal(false);
     setCodexManualAction(null);
     setManualActionLoading(false);
@@ -1383,7 +1361,6 @@ export const AutoRegisterPage: React.FC = () => {
     setIsRegistering(true);
     batchProgressEntriesRef.current.clear();
     setRegistrationResult(null);
-    cancelledStopTaskIdsRef.current.clear();
     realtimeOutputRef.current = []; // 清空ref
     setRealtimeOutput([]); // 清空之前的输出
     setToast({ message: `开始注册${activeProviderLabel}账户...`, type: "info" });
@@ -1844,7 +1821,6 @@ export const AutoRegisterPage: React.FC = () => {
     setIsLoading(true);
     setIsRegistering(true);
     setRegistrationResult(null);
-    cancelledStopTaskIdsRef.current.clear();
     realtimeOutputRef.current = [];
     setRealtimeOutput([]);
     setRegistrationResult({
