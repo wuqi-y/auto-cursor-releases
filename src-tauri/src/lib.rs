@@ -7250,6 +7250,158 @@ async fn save_email_config(config: String) -> Result<(), String> {
     Ok(())
 }
 
+// ========== 豪猪 API：配置目录 ~/.auto-cursor-vip + HTTP 代理 + 独立窗口 ==========
+
+fn haozhu_vip_dir() -> Result<PathBuf, String> {
+    let home =
+        dirs::home_dir().ok_or_else(|| "Could not find user home directory".to_string())?;
+    Ok(home.join(".auto-cursor-vip"))
+}
+
+fn haozhu_api_config_path() -> Result<PathBuf, String> {
+    Ok(haozhu_vip_dir()?.join("haozhu_api_config.json"))
+}
+
+/// 读取豪猪 API 本地 JSON（无文件时返回空字符串）
+#[tauri::command]
+async fn read_haozhu_api_config() -> Result<String, String> {
+    let path = haozhu_api_config_path()?;
+    if path.exists() {
+        fs::read_to_string(&path).map_err(|e| format!("读取豪猪 API 配置失败: {}", e))
+    } else {
+        Ok(String::new())
+    }
+}
+
+#[tauri::command]
+async fn save_haozhu_api_config(config: String) -> Result<(), String> {
+    serde_json::from_str::<serde_json::Value>(&config)
+        .map_err(|e| format!("Invalid JSON format: {}", e))?;
+    let dir = haozhu_vip_dir()?;
+    fs::create_dir_all(&dir).map_err(|e| format!("创建目录失败: {}", e))?;
+    let path = haozhu_api_config_path()?;
+    fs::write(&path, config).map_err(|e| format!("保存豪猪 API 配置失败: {}", e))?;
+    log_info!("✅ 豪猪 API 配置已保存");
+    Ok(())
+}
+
+fn haozhu_allowed_hosts_from_disk() -> Vec<String> {
+    let mut hosts = vec![
+        "api.haozhuma.com".to_string(),
+        "api.haozhuyun.com".to_string(),
+    ];
+    if let Ok(path) = haozhu_api_config_path() {
+        if let Ok(content) = fs::read_to_string(&path) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(base) = v.get("serverBase").and_then(|b| b.as_str()) {
+                    if let Ok(u) = reqwest::Url::parse(base) {
+                        if let Some(h) = u.host_str() {
+                            let s = h.to_lowercase();
+                            if !hosts.iter().any(|x| x.eq_ignore_ascii_case(&s)) {
+                                hosts.push(s);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    hosts
+}
+
+/// 受控 GET：仅允许 HTTPS、主机在白名单（官方域名 + 配置中的 serverBase）、路径含 `sms`
+#[tauri::command]
+async fn haozhu_http_get(full_url: String) -> Result<String, String> {
+    let parsed =
+        reqwest::Url::parse(&full_url).map_err(|e| format!("无效 URL: {}", e))?;
+    if parsed.scheme() != "https" {
+        return Err("仅允许 HTTPS".to_string());
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "URL 缺少主机名".to_string())?
+        .to_lowercase();
+    let allowed = haozhu_allowed_hosts_from_disk();
+    if !allowed.iter().any(|h| h.eq_ignore_ascii_case(&host)) {
+        return Err(format!(
+            "主机不在允许列表: {}（允许: {}）",
+            host,
+            allowed.join(", ")
+        ));
+    }
+    if !parsed.path().contains("sms") {
+        return Err("仅允许访问包含 sms 的路径（一般为 /sms/）".to_string());
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| format!("HTTP 客户端: {}", e))?;
+
+    let resp = client
+        .get(parsed)
+        .header(
+            reqwest::header::USER_AGENT,
+            format!(
+                "auto-cursor/{} (HaozhuAPI)",
+                env!("CARGO_PKG_VERSION")
+            ),
+        )
+        .send()
+        .await
+        .map_err(|e| format!("请求失败: {}", e))?;
+
+    let status = resp.status();
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| format!("读取响应失败: {}", e))?;
+
+    if !status.is_success() {
+        return Err(format!(
+            "HTTP {}: {}",
+            status.as_u16(),
+            text.chars().take(500).collect::<String>()
+        ));
+    }
+
+    Ok(text)
+}
+
+/// 打开或聚焦豪猪 API 子窗口（加载前端路由 /haozhu-api）
+#[tauri::command]
+async fn open_haozhu_api_window(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    if let Some(w) = app.get_webview_window("haozhu_api") {
+        w.show().map_err(|e| format!("显示窗口失败: {}", e))?;
+        let _ = w.set_focus();
+        return Ok(serde_json::json!({
+            "success": true,
+            "message": "豪猪 API 窗口已打开"
+        }));
+    }
+
+    let webview_window = tauri::WebviewWindowBuilder::new(
+        &app,
+        "haozhu_api",
+        tauri::WebviewUrl::App(PathBuf::from("/haozhu-api")),
+    )
+    .title("豪猪 API")
+    .inner_size(960.0, 720.0)
+    .resizable(true)
+    .decorations(false)
+    .transparent(true)
+    .shadow(false)
+    .build();
+
+    match webview_window {
+        Ok(_) => Ok(serde_json::json!({
+            "success": true,
+            "message": "已打开豪猪 API 窗口"
+        })),
+        Err(e) => Err(format!("创建豪猪 API 窗口失败: {}", e)),
+    }
+}
+
 // 获取应用版本
 #[tauri::command]
 async fn get_app_version(app: tauri::AppHandle) -> Result<String, String> {
@@ -8565,6 +8717,10 @@ pub fn run() {
             save_bank_card_config,
             read_email_config,
             save_email_config,
+            read_haozhu_api_config,
+            save_haozhu_api_config,
+            haozhu_http_get,
+            open_haozhu_api_window,
             get_app_version,
             open_update_url,
             copy_pybuild_resources,

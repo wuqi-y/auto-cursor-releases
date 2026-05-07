@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { BrowserRouter as Router, Routes, Route } from "react-router-dom";
 import { Layout } from "./components/Layout";
 import { HomePage } from "./pages/HomePage";
@@ -7,12 +8,13 @@ import { AuthCheckPage } from "./pages/AuthCheckPage";
 import { TokenManagePage } from "./pages/TokenManagePage";
 import { AutoRegisterPage } from "./pages/AutoRegisterPage";
 import { CursorBackupPage } from "./pages/CursorBackupPage";
+import { HaozhuApiPage } from "./pages/HaozhuApiPage";
 import { UsageProvider } from "./context/UsageContext";
 import { UpdateModal } from "./components/UpdateModal";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { checkForUpdates } from "./services/updateService";
 import { UpdateInfo } from "./types/update";
-import { useConfigStore } from "./stores/configStore";
+import { useConfigStore, type ThemeMode } from "./stores/configStore";
 import "./App.css";
 
 function App() {
@@ -25,6 +27,19 @@ function App() {
     root.classList.toggle("dark", themeMode === "dark");
     root.style.colorScheme = themeMode;
   }, [themeMode]);
+
+  /** 多窗口共用：任一窗口切换主题后广播，其它 Webview 同步 zustand */
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listen<{ themeMode: ThemeMode }>("app-theme-mode", (event) => {
+      useConfigStore.getState().setThemeMode(event.payload.themeMode);
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => {
+      unlisten?.();
+    };
+  }, []);
 
   useEffect(() => {
     // 应用启动时检查更新
@@ -106,16 +121,17 @@ function App() {
     <ErrorBoundary>
       <UsageProvider>
         <Router>
-          <Layout>
-            <Routes>
-              <Route path="/" element={<HomePage />} />
-              <Route path="/machine-id" element={<MachineIdPage />} />
-              <Route path="/auth-check" element={<AuthCheckPage />} />
-              <Route path="/token-manage" element={<TokenManagePage />} />
-              <Route path="/auto-register" element={<AutoRegisterPage />} />
-              <Route path="/cursor-backup" element={<CursorBackupPage />} />
-            </Routes>
-          </Layout>
+          <Routes>
+            <Route path="/haozhu-api" element={<HaozhuApiPage />} />
+            <Route path="/" element={<Layout />}>
+              <Route index element={<HomePage />} />
+              <Route path="machine-id" element={<MachineIdPage />} />
+              <Route path="auth-check" element={<AuthCheckPage />} />
+              <Route path="token-manage" element={<TokenManagePage />} />
+              <Route path="auto-register" element={<AutoRegisterPage />} />
+              <Route path="cursor-backup" element={<CursorBackupPage />} />
+            </Route>
+          </Routes>
         </Router>
 
         {/* 更新弹窗 */}
